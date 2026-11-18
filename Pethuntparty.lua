@@ -8,7 +8,9 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
--- โฟลเดอร์และไฟล์บันทึกการตั้งค่า
+-- ========================================================
+-- โฟลเดอร์และไฟล์บันทึกการตั้งค่าใน executor workspace (x2shifthub)
+-- ========================================================
 local SETTINGS_FOLDER = "x2shifthub"
 local SETTINGS_FILE = SETTINGS_FOLDER .. "/config.json"
 
@@ -20,34 +22,41 @@ local config = {
     GuiPos = nil
 }
 
--- อ่านการตั้งค่าจาก workspace
+-- อ่านการตั้งค่าจาก workspace/x2shifthub/config.json
 local function loadSettings()
     pcall(function()
         if isfile and isfile(SETTINGS_FILE) then
-            local data = HttpService:JSONDecode(readfile(SETTINGS_FILE))
-            if type(data) == "table" then
-                if data.AutoAttack ~= nil then config.AutoAttack = data.AutoAttack end
-                if data.AutoSprint ~= nil then config.AutoSprint = data.AutoSprint end
-                if data.AutoChest ~= nil then config.AutoChest = data.AutoChest end
-                if data.AutoReplay ~= nil then config.AutoReplay = data.AutoReplay end
-                if data.GuiPos ~= nil then config.GuiPos = data.GuiPos end
+            local raw = readfile(SETTINGS_FILE)
+            if raw and #raw > 0 then
+                local data = HttpService:JSONDecode(raw)
+                if type(data) == "table" then
+                    if data.AutoAttack ~= nil then config.AutoAttack = data.AutoAttack end
+                    if data.AutoSprint ~= nil then config.AutoSprint = data.AutoSprint end
+                    if data.AutoChest ~= nil then config.AutoChest = data.AutoChest end
+                    if data.AutoReplay ~= nil then config.AutoReplay = data.AutoReplay end
+                    if data.GuiPos ~= nil and type(data.GuiPos) == "table" then
+                        config.GuiPos = data.GuiPos
+                    end
+                end
             end
         end
     end)
 end
 
--- บันทึกการตั้งค่าลง workspace
+-- บันทึกการตั้งค่าลง workspace/x2shifthub/config.json
 local function saveSettings()
     pcall(function()
-        if makefolder and not isfolder(SETTINGS_FOLDER) then
+        if makefolder and not (isfolder and isfolder(SETTINGS_FOLDER)) then
             makefolder(SETTINGS_FOLDER)
         end
         if writefile then
-            writefile(SETTINGS_FILE, HttpService:JSONEncode(config))
+            local payload = HttpService:JSONEncode(config)
+            writefile(SETTINGS_FILE, payload)
         end
     end)
 end
 
+-- โหลดคอนฟิกทันทีที่เริ่มสคริปต์
 loadSettings()
 
 -- ScreenGui หลัก
@@ -228,7 +237,6 @@ local function triggerOpenPartyChest()
         local root = character and character:FindFirstChild("HumanoidRootPart")
         if not root then return end
         
-        -- ตรวจสอบจากโฟลเดอร์หรือ Model ของ Party Chest โดยตรง ไม่วนลูปทั้ง workspace
         local chests = {}
         for _, obj in ipairs(workspace:GetChildren()) do
             if obj.Name == "Party Chest" then
@@ -331,6 +339,7 @@ mainStroke.Color = Color3.fromRGB(50, 54, 66)
 mainStroke.Thickness = 1.5
 mainStroke.Parent = mainFrame
 
+-- บันทึกตำแหน่งล่าสุดลง config.json ทันทีที่ลากวาง
 mainFrame.DragStopped:Connect(function()
     config.GuiPos = {
         XScale = mainFrame.Position.X.Scale,
@@ -530,20 +539,22 @@ local chestSwitch = createSwitch("AutoChestSwitch", "Auto Chest Party", "E", 4, 
     saveSettings()
 end)
 
--- โหลดสถานะเริ่มต้น
-local initAuto = isGameAutoOn()
-if initAuto ~= config.AutoAttack then
-    config.AutoAttack = initAuto
-end
-local initSprint = isGameSprintOn()
-if initSprint ~= config.AutoSprint then
-    config.AutoSprint = initSprint
-end
-
+-- นำค่าจาก config.json มาแสดงผลบนสวิตช์
 attackSwitch.SetState(config.AutoAttack, false)
 sprintSwitch.SetState(config.AutoSprint, false)
 replaySwitch.SetState(config.AutoReplay, false)
 chestSwitch.SetState(config.AutoChest, false)
+
+-- นำสถานะ config มาเปิดใช้งานระบบในเกมตอนเริ่ม
+task.spawn(function()
+    task.wait(0.5)
+    if config.AutoAttack then
+        setGameAutoState(true)
+    end
+    if config.AutoSprint then
+        setGameSprintState(true)
+    end
+end)
 
 -- ========================================================
 -- ซิงค์แบบ Event-Driven (ไม่มีลูปหนัก ไม่กิน CPU)
@@ -575,7 +586,7 @@ local function bindGameWatchers()
 end
 bindGameWatchers()
 
--- ลูปเช็คซิงค์เบาๆ (ทุก 0.5 วินาที ใช้แคช ไม่สแกน GUI ทั้งจอ)
+-- ลูปเช็คซิงค์เบาๆ
 task.spawn(function()
     while true do
         task.wait(0.5)
@@ -596,7 +607,7 @@ task.spawn(function()
     end
 end)
 
--- ลูปทำงาน Auto Replay (ตรวจเฉพาะ DungeonPopup ไม่สแกนทั้งจอ)
+-- ลูปทำงาน Auto Replay
 task.spawn(function()
     while true do
         if config.AutoReplay then
@@ -625,7 +636,7 @@ UserInputService.InputBegan:Connect(function(input, processed)
     end
 end)
 
--- ลูปเปิดกล่องปาร์ตี้ E (ตรวจเฉพาะ Model "Party Chest" ใน workspace ไม่สแกน 170,000 ชิ้น)
+-- ลูปเปิดกล่องปาร์ตี้ E
 task.spawn(function()
     while true do
         if config.AutoChest then
