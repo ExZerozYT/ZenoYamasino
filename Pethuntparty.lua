@@ -98,12 +98,13 @@ local function getCachedAutoBtn()
             and playerGui.Hud.Root.HudLayer:FindFirstChild("Hotbar")
         
         if hotbar then
-            for _, frame in ipairs(hotbar:GetDescendants()) do
-                if frame:IsA("Frame") and frame:FindFirstChild("TextLabel") and frame.TextLabel:IsA("TextLabel") and frame.TextLabel.Text:find("AUTO") then
-                    local tb = frame:FindFirstChildWhichIsA("TextButton", true)
-                    if tb then
-                        cachedAutoBtn = tb
-                        return
+            for _, btn in ipairs(hotbar:GetDescendants()) do
+                if btn:IsA("TextButton") then
+                    for _, lbl in ipairs(btn:GetDescendants()) do
+                        if lbl:IsA("TextLabel") and (lbl.Text:find("AUTO") or lbl.Text:find("ออโต้")) then
+                            cachedAutoBtn = btn
+                            return
+                        end
                     end
                 end
             end
@@ -117,7 +118,7 @@ local function isGameAutoOn()
     if btn and btn:IsA("GuiObject") then
         return btn.BackgroundColor3.G > 0.6
     end
-    return false
+    return nil
 end
 
 local function clickGameAutoButton()
@@ -151,7 +152,12 @@ local function clickGameAutoButton()
 end
 
 local function setGameAutoState(targetState)
-    if isGameAutoOn() ~= targetState then
+    local current = isGameAutoOn()
+    if current ~= nil then
+        if current ~= targetState then
+            clickGameAutoButton()
+        end
+    else
         clickGameAutoButton()
     end
 end
@@ -170,12 +176,13 @@ local function getCachedSprintBtn()
             and playerGui.Hud.Root.HudLayer:FindFirstChild("Hotbar")
 
         if hotbar then
-            for _, frame in ipairs(hotbar:GetDescendants()) do
-                if frame:IsA("Frame") and frame:FindFirstChild("TextLabel") and frame.TextLabel:IsA("TextLabel") and frame.TextLabel.Text == "วิ่ง" then
-                    local tb = frame:FindFirstChildWhichIsA("TextButton", true)
-                    if tb then
-                        cachedSprintBtn = tb
-                        return
+            for _, btn in ipairs(hotbar:GetDescendants()) do
+                if btn:IsA("TextButton") then
+                    for _, lbl in ipairs(btn:GetDescendants()) do
+                        if lbl:IsA("TextLabel") and (lbl.Text == "Run" or lbl.Text == "Shift" or lbl.Text == "วิ่ง") then
+                            cachedSprintBtn = btn
+                            return
+                        end
                     end
                 end
             end
@@ -189,7 +196,7 @@ local function isGameSprintOn()
     if btn and btn:IsA("GuiObject") then
         return btn.BackgroundColor3.G > 0.6
     end
-    return false
+    return nil
 end
 
 local function clickGameSprintButton()
@@ -223,55 +230,118 @@ local function clickGameSprintButton()
 end
 
 local function setGameSprintState(targetState)
-    if isGameSprintOn() ~= targetState then
+    local current = isGameSprintOn()
+    if current ~= nil then
+        if current ~= targetState then
+            clickGameSprintButton()
+        end
+    else
         clickGameSprintButton()
     end
 end
 
 -- ========================================================
--- ลอจิกการทำงานของปุ่ม E (เปิดกล่องปาร์ตี้ - ค้นหาเจาะจงเฉพาะกล่อง)
+-- ลอจิกการทำงานของปุ่ม E (เปิดกล่องปาร์ตี้ - จำกัดระยะรอบตัว)
 -- ========================================================
+local isMovingToChest = false
+local CHEST_MAX_DISTANCE = 50 -- จำกัดระยะตรวจจับกล่องรอบตัว (studs) ป้องกันไม่ให้เดิน/วาร์ปไปไกลทั่วแมพ
+
 local function triggerOpenPartyChest()
+    if isMovingToChest then return end
+
     pcall(function()
         local character = player.Character
+        local humanoid = character and character:FindFirstChildWhichIsA("Humanoid")
         local root = character and character:FindFirstChild("HumanoidRootPart")
-        if not root then return end
-        
-        local chests = {}
+        if not root or not humanoid or humanoid.Health <= 0 then return end
+
+        -- รวมกล่องทั้งหมดที่มี prompt เปิดอยู่ (เฉพาะกล่องที่อยู่ในระยะรอบตัว)
+        local nearestBase, nearestPrompt, nearestDist = nil, nil, CHEST_MAX_DISTANCE
         for _, obj in ipairs(workspace:GetChildren()) do
             if obj.Name == "Party Chest" then
-                table.insert(chests, obj)
-            end
-        end
-
-        local opened = false
-        for _, chest in ipairs(chests) do
-            local prompt = chest:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if prompt and prompt.Enabled then
-                local base = prompt.Parent
-                if base and base:IsA("BasePart") then
-                    local dist = (base.Position - root.Position).Magnitude
-                    if dist <= (prompt.MaxActivationDistance + 4) then
-                        if fireproximityprompt then
-                            fireproximityprompt(prompt)
-                            opened = true
-                        else
-                            prompt:InputHoldBegin()
-                            task.wait(0.08)
-                            prompt:InputHoldEnd()
-                            opened = true
+                local prompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+                if prompt and prompt.Enabled then
+                    local base = prompt.Parent
+                    if base and base:IsA("BasePart") then
+                        local dist = (base.Position - root.Position).Magnitude
+                        if dist <= CHEST_MAX_DISTANCE and dist < nearestDist then
+                            nearestBase = base
+                            nearestPrompt = prompt
+                            nearestDist = dist
                         end
                     end
                 end
             end
         end
 
-        if not opened then
-            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-            task.wait(0.05)
-            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+        if not nearestPrompt or not nearestBase then return end
+
+        local maxRange = nearestPrompt.MaxActivationDistance + 4
+
+        -- ฟังก์ชันเปิดกล่อง
+        local function openChest()
+            if not (nearestPrompt and nearestPrompt.Parent and nearestPrompt.Enabled) then return false end
+            if fireproximityprompt then
+                fireproximityprompt(nearestPrompt)
+                return true
+            else
+                nearestPrompt:InputHoldBegin()
+                task.wait(0.08)
+                nearestPrompt:InputHoldEnd()
+                return true
+            end
+        end
+
+        if nearestDist <= maxRange then
+            -- อยู่ในระยะ → เปิดเลย
+            if not openChest() then
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+                task.wait(0.05)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+            end
+        else
+            -- ไกลเกินระยะกดแต่ยังอยู่ในรัศมีรอบตัว (<= CHEST_MAX_DISTANCE) → ขยับไปเปิดแล้วกลับมาตำแหน่งเดิม
+            isMovingToChest = true
+            local savedCFrame = root.CFrame
+
+            -- tween ไปหน้ากล่อง (ห่าง 3 stud เพื่อให้ prompt trigger ได้)
+            local targetCFrame = nearestBase.CFrame * CFrame.new(0, 0, 3)
+            local speed = 80 -- studs/s
+            local tweenTime = math.clamp(nearestDist / speed, 0.1, 4)
+
+            local goTween = TweenService:Create(root, TweenInfo.new(tweenTime, Enum.EasingStyle.Linear), {
+                CFrame = targetCFrame
+            })
+            goTween:Play()
+            goTween.Completed:Wait()
+
+            task.wait(0.15)
+
+            -- เปิดกล่อง
+            if not openChest() then
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+                task.wait(0.05)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+            end
+
+            task.wait(0.3)
+
+            -- กลับตำแหน่งเดิม
+            if root and root.Parent then
+                local backDist = (savedCFrame.Position - root.Position).Magnitude
+                local backTime = math.clamp(backDist / speed, 0.1, 4)
+                local backTween = TweenService:Create(root, TweenInfo.new(backTime, Enum.EasingStyle.Linear), {
+                    CFrame = savedCFrame
+                })
+                backTween:Play()
+                backTween.Completed:Wait()
+            end
+
+            isMovingToChest = false
         end
     end)
+
+    isMovingToChest = false -- safety reset กันค้างถ้า pcall จับ error
 end
 
 -- ========================================================
@@ -280,25 +350,48 @@ end
 local function triggerReplayButton()
     pcall(function()
         local root = playerGui:FindFirstChild("Hud") and playerGui.Hud:FindFirstChild("Root")
-        local popup = root and root:FindFirstChild("DungeonPopup")
+        if not root then return end
         
-        if popup and popup.Visible then
-            for _, d in ipairs(popup:GetDescendants()) do
-                if d:IsA("GuiButton") and d.Visible then
-                    local hasText = (d:IsA("TextButton") and d.Text:find("เล่นซ้ำ"))
-                    if not hasText and d:FindFirstChild("Caption") then
-                        hasText = d.Caption.Text:find("เล่นซ้ำ")
-                    end
-                    if hasText then
-                        if getconnections then
-                            for _, c in ipairs(getconnections(d.Activated)) do
-                                c:Fire()
-                                return
+        local popups = {
+            root:FindFirstChild("DungeonPopup"),
+            root:FindFirstChild("WorldBossResults")
+        }
+        
+        for _, popup in ipairs(popups) do
+            if popup and popup.Visible then
+                for _, d in ipairs(popup:GetDescendants()) do
+                    if d:IsA("GuiButton") and d.Visible then
+                        local hasText = false
+                        if d:IsA("TextButton") then
+                            local t = d.Text:upper()
+                            if t:find("REPLAY") or t:find("AGAIN") or t:find("RETRY") or d.Text:find("เล่นซ้ำ") then
+                                hasText = true
                             end
                         end
-                        if firesignal then
-                            firesignal(d.Activated)
-                            return
+                        if not hasText then
+                            for _, child in ipairs(d:GetDescendants()) do
+                                if child:IsA("TextLabel") then
+                                    local ct = child.Text:upper()
+                                    if ct:find("REPLAY") or ct:find("AGAIN") or ct:find("RETRY") or child.Text:find("เล่นซ้ำ") then
+                                        hasText = true
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                        if hasText then
+                            local clicked = false
+                            if getconnections then
+                                for _, c in ipairs(getconnections(d.Activated)) do
+                                    c:Fire()
+                                    clicked = true
+                                end
+                            end
+                            if not clicked and firesignal then
+                                firesignal(d.Activated)
+                                clicked = true
+                            end
+                            if clicked then return end
                         end
                     end
                 end
@@ -559,10 +652,13 @@ end)
 -- ========================================================
 -- ซิงค์แบบ Event-Driven (ไม่มีลูปหนัก ไม่กิน CPU)
 -- ========================================================
+local autoConn = nil
+local sprintConn = nil
+
 local function bindGameWatchers()
     local autoBtn = getCachedAutoBtn()
-    if autoBtn then
-        autoBtn:GetPropertyChangedSignal("BackgroundColor3"):Connect(function()
+    if autoBtn and not autoConn then
+        autoConn = autoBtn:GetPropertyChangedSignal("BackgroundColor3"):Connect(function()
             local on = autoBtn.BackgroundColor3.G > 0.6
             if config.AutoAttack ~= on then
                 config.AutoAttack = on
@@ -573,8 +669,8 @@ local function bindGameWatchers()
     end
 
     local sprintBtn = getCachedSprintBtn()
-    if sprintBtn then
-        sprintBtn:GetPropertyChangedSignal("BackgroundColor3"):Connect(function()
+    if sprintBtn and not sprintConn then
+        sprintConn = sprintBtn:GetPropertyChangedSignal("BackgroundColor3"):Connect(function()
             local on = sprintBtn.BackgroundColor3.G > 0.6
             if config.AutoSprint ~= on then
                 config.AutoSprint = on
@@ -590,16 +686,17 @@ bindGameWatchers()
 task.spawn(function()
     while true do
         task.wait(0.5)
+        bindGameWatchers()
         
         local gameAutoStatus = isGameAutoOn()
-        if config.AutoAttack ~= gameAutoStatus then
+        if gameAutoStatus ~= nil and config.AutoAttack ~= gameAutoStatus then
             config.AutoAttack = gameAutoStatus
             attackSwitch.SetState(gameAutoStatus, true)
             saveSettings()
         end
 
         local gameSprintStatus = isGameSprintOn()
-        if config.AutoSprint ~= gameSprintStatus then
+        if gameSprintStatus ~= nil and config.AutoSprint ~= gameSprintStatus then
             config.AutoSprint = gameSprintStatus
             sprintSwitch.SetState(gameSprintStatus, true)
             saveSettings()
@@ -621,17 +718,21 @@ end)
 UserInputService.InputBegan:Connect(function(input, processed)
     if not processed then
         if input.KeyCode == Enum.KeyCode.R then
-            task.wait(0.1)
+            task.wait(0.15)
             local gameStatus = isGameAutoOn()
-            config.AutoAttack = gameStatus
-            attackSwitch.SetState(gameStatus, true)
-            saveSettings()
+            if gameStatus ~= nil and config.AutoAttack ~= gameStatus then
+                config.AutoAttack = gameStatus
+                attackSwitch.SetState(gameStatus, true)
+                saveSettings()
+            end
         elseif input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
-            task.wait(0.1)
+            task.wait(0.15)
             local sprintStatus = isGameSprintOn()
-            config.AutoSprint = sprintStatus
-            sprintSwitch.SetState(sprintStatus, true)
-            saveSettings()
+            if sprintStatus ~= nil and config.AutoSprint ~= sprintStatus then
+                config.AutoSprint = sprintStatus
+                sprintSwitch.SetState(sprintStatus, true)
+                saveSettings()
+            end
         end
     end
 end)
