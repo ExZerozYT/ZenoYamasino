@@ -12,6 +12,7 @@ local HttpService = game:GetService("HttpService")
 local UserInputService = game:GetService("UserInputService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local TeleportService = game:GetService("TeleportService")
+local GuiService = game:GetService("GuiService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -28,10 +29,14 @@ local config = {
     AutoSprint = false,
     AutoChest = false,
     AutoReplay = false,
+    AutoRejoin = false,
     -- Dungeon
     AutoDungeon = false,
     SelectedDungeon = "all",
     PreferredDiff = "highest",
+    DungeonCrypt = true,
+    DungeonGold = true,
+    DungeonEndless = true,
     -- Boss
     SelectedBoss = "Birdbath Owl",
     -- UI
@@ -74,44 +79,55 @@ loadSettings()
 -- ========================================================
 -- Dungeon Detection
 -- ========================================================
-local function isInsideDungeon()
+local lastInRunCheck = 0
+local cachedInRun = false
+
+local function getDungeonRemoteQuick()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if remotes and remotes:FindFirstChild("Dungeon") then
+        return remotes.Dungeon
+    end
+    local success, net = pcall(function()
+        return require(ReplicatedStorage.Shared.Net)
+    end)
+    if success and net and net.func then
+        return net.func("Dungeon")
+    end
+    return nil
+end
+
+local function isInsideDungeon(forceRefresh)
     local attr = player:GetAttribute("Dungeon") or player:GetAttribute("InDungeon")
     if attr then return true end
-
-    local wsDungeons = workspace:FindFirstChild("Dungeons")
-        or workspace:FindFirstChild("Dungeon")
-        or workspace:FindFirstChild("Tower")
-    if wsDungeons then
-        if wsDungeons:FindFirstChild(player.Name) then
-            return true
-        end
-        if #wsDungeons:GetChildren() > 0 then
-            local char = player.Character
-            local root = char and char:FindFirstChild("HumanoidRootPart")
-            if root then
-                for _, run in ipairs(wsDungeons:GetChildren()) do
-                    local ok, pivot = pcall(function() return run:GetPivot() end)
-                    if ok and pivot and (pivot.Position - root.Position).Magnitude < 600 then
-                        return true
-                    end
-                end
-            end
-        end
-    end
 
     local hud = playerGui:FindFirstChild("Hud")
     local rootGui = hud and hud:FindFirstChild("Root")
     if rootGui then
-        if rootGui:FindFirstChild("DungeonPopup") or rootGui:FindFirstChild("WorldBossResults") then
-            return true
-        end
         local hudLayer = rootGui:FindFirstChild("HudLayer")
-        if hudLayer and (hudLayer:FindFirstChild("DungeonStage") or hudLayer:FindFirstChild("TowerFloor")) then
-            return true
+        if hudLayer then
+            local dgStage = hudLayer:FindFirstChild("DungeonStage")
+            local twFloor = hudLayer:FindFirstChild("TowerFloor")
+            if (dgStage and dgStage.Visible) or (twFloor and twFloor.Visible) then
+                return true
+            end
         end
     end
 
-    return false
+    local now = os.clock()
+    if forceRefresh or (now - lastInRunCheck) >= 1.5 then
+        lastInRunCheck = now
+        local remote = getDungeonRemoteQuick()
+        if remote then
+            local ok, st = pcall(function()
+                return remote:InvokeServer("state")
+            end)
+            if ok and type(st) == "table" and st.inRun ~= nil then
+                cachedInRun = (st.inRun == true)
+            end
+        end
+    end
+
+    return cachedInRun
 end
 
 -- ========================================================
@@ -629,6 +645,13 @@ local function getAvailableDungeons()
     return available
 end
 
+local function isDungeonEnabled(dungeonId)
+    if dungeonId == "crypt" then return config.DungeonCrypt ~= false end
+    if dungeonId == "gold" then return config.DungeonGold ~= false end
+    if dungeonId == "endless" then return config.DungeonEndless ~= false end
+    return true
+end
+
 local isEntering = false
 local function tryEnterDungeon()
     if isEntering or isInsideDungeon() then return end
@@ -639,15 +662,13 @@ local function tryEnterDungeon()
         if #list == 0 then return end
 
         local targetEntry = nil
-        if config.SelectedDungeon ~= "all" then
-            for _, item in ipairs(list) do
-                if item.dungeon.id == config.SelectedDungeon then
+        for _, item in ipairs(list) do
+            if isDungeonEnabled(item.dungeon.id) then
+                if config.SelectedDungeon == "all" or item.dungeon.id == config.SelectedDungeon then
                     targetEntry = item
                     break
                 end
             end
-        else
-            targetEntry = list[1]
         end
 
         if not targetEntry then return end
@@ -862,7 +883,7 @@ for _, oldName in ipairs({
     end
 end
 
-local EXPANDED_SIZE = UDim2.new(0, 310, 0, 392)
+local EXPANDED_SIZE = UDim2.new(0, 310, 0, 406)
 local COLLAPSED_SIZE = UDim2.new(0, 310, 0, 44)
 
 local mainFrame = Instance.new("Frame")
@@ -1134,6 +1155,7 @@ local function updateActiveBadge()
     if config.AutoSprint then count += 1 end
     if config.AutoChest then count += 1 end
     if config.AutoReplay then count += 1 end
+    if config.AutoRejoin then count += 1 end
     if config.AutoDungeon then count += 1 end
 
     activeBadge.Text = count .. " ON"
@@ -1283,6 +1305,11 @@ local replaySwitch = createSwitch(farmPage, "AutoReplaySwitch", "Auto Replay", "
     end
 end)
 
+local rejoinSwitch = createSwitch(farmPage, "AutoRejoinSwitch", "Auto Rejoin", "เข้าเซิร์ฟเวอร์ใหม่อัตโนมัติเมื่อเน็ตหลุด/ถูกเตะ", 5, function(state)
+    config.AutoRejoin = state
+    saveSettings()
+end)
+
 -- ========================================================
 -- TAB 2: DUNGEON PAGE
 -- ========================================================
@@ -1293,7 +1320,7 @@ dungeonList.SortOrder = Enum.SortOrder.LayoutOrder
 -- Live Dungeon Status Pill
 local dgStatusCard = Instance.new("Frame")
 dgStatusCard.Name = "DgStatusCard"
-dgStatusCard.Size = UDim2.new(1, 0, 0, 38)
+dgStatusCard.Size = UDim2.new(1, 0, 0, 34)
 dgStatusCard.BackgroundColor3 = THEME.Surface
 dgStatusCard.BorderSizePixel = 0
 dgStatusCard.LayoutOrder = 1
@@ -1320,18 +1347,122 @@ dgStatusLabel.TextSize = 11
 dgStatusLabel.TextColor3 = THEME.TextPrimary
 dgStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 
-local autoDungeonSwitch = createSwitch(dungeonPage, "AutoDungeonSwitch", "Auto Enter Dungeon", "เข้าดันเจี้ยนที่ลงได้อัตโนมัติ + กด Join", 2, function(state)
+local autoDungeonSwitch = createSwitch(dungeonPage, "AutoDungeonSwitch", "Auto Enter Dungeon", "เข้าดันเจี้ยนที่เลือกอัตโนมัติ + กด Join", 2, function(state)
     config.AutoDungeon = state
+    saveSettings()
+end)
+
+-- 3 Dungeon Selection Switches
+local function createMiniSwitch(parent, name, titleText, layoutOrder, onToggleCallback)
+    local row = Instance.new("TextButton")
+    row.Name = name
+    row.Size = UDim2.new(1, 0, 0, 28)
+    row.BackgroundColor3 = THEME.Bg
+    row.BorderSizePixel = 0
+    row.AutoButtonColor = false
+    row.Text = ""
+    row.LayoutOrder = layoutOrder
+    row.Parent = parent
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 7)
+
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size = UDim2.new(1, -56, 1, 0)
+    lbl.Position = UDim2.new(0, 10, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = titleText
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 11
+    lbl.TextColor3 = THEME.TextPrimary
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    local track = Instance.new("Frame", row)
+    track.Size = UDim2.new(0, 34, 0, 18)
+    track.Position = UDim2.new(1, -44, 0.5, -9)
+    track.BackgroundColor3 = THEME.TrackOff
+    track.BorderSizePixel = 0
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+    local thumb = Instance.new("Frame", track)
+    thumb.Size = UDim2.new(0, 12, 0, 12)
+    thumb.Position = UDim2.new(0, 3, 0.5, -6)
+    thumb.BackgroundColor3 = Color3.fromRGB(203, 213, 225)
+    thumb.BorderSizePixel = 0
+    Instance.new("UICorner", thumb).CornerRadius = UDim.new(1, 0)
+
+    local isEnabled = false
+    local function setVisual(state, animate)
+        isEnabled = state
+        local tTrack = state and THEME.Green or THEME.TrackOff
+        local tThumb = state and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(203, 213, 225)
+        local tPos = state and UDim2.new(1, -15, 0.5, -6) or UDim2.new(0, 3, 0.5, -6)
+        if animate then
+            local ti = TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+            TweenService:Create(track, ti, { BackgroundColor3 = tTrack }):Play()
+            TweenService:Create(thumb, ti, { Position = tPos, BackgroundColor3 = tThumb }):Play()
+        else
+            track.BackgroundColor3 = tTrack
+            thumb.BackgroundColor3 = tThumb
+            thumb.Position = tPos
+        end
+    end
+
+    row.MouseButton1Click:Connect(function()
+        local newState = not isEnabled
+        setVisual(newState, true)
+        if onToggleCallback then onToggleCallback(newState) end
+    end)
+
+    return {
+        SetState = function(state, animate)
+            setVisual(state, animate)
+        end,
+    }
+end
+
+local dgFilterCard = Instance.new("Frame")
+dgFilterCard.Name = "DgFilterCard"
+dgFilterCard.Size = UDim2.new(1, 0, 0, 106)
+dgFilterCard.BackgroundColor3 = THEME.Surface
+dgFilterCard.BorderSizePixel = 0
+dgFilterCard.LayoutOrder = 3
+dgFilterCard.Parent = dungeonPage
+Instance.new("UICorner", dgFilterCard).CornerRadius = UDim.new(0, 10)
+local dgFilterStroke = Instance.new("UIStroke", dgFilterCard)
+dgFilterStroke.Color = THEME.Border
+dgFilterStroke.Thickness = 1
+
+local dgFilterPad = Instance.new("UIPadding", dgFilterCard)
+dgFilterPad.PaddingTop = UDim.new(0, 7)
+dgFilterPad.PaddingBottom = UDim.new(0, 7)
+dgFilterPad.PaddingLeft = UDim.new(0, 8)
+dgFilterPad.PaddingRight = UDim.new(0, 8)
+
+local dgFilterLayout = Instance.new("UIListLayout", dgFilterCard)
+dgFilterLayout.Padding = UDim.new(0, 4)
+dgFilterLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local cryptSwitch = createMiniSwitch(dgFilterCard, "DungeonCryptSwitch", "Grim Antler's Crypt", 1, function(state)
+    config.DungeonCrypt = state
+    saveSettings()
+end)
+
+local goldSwitch = createMiniSwitch(dgFilterCard, "DungeonGoldSwitch", "Golden Vault", 2, function(state)
+    config.DungeonGold = state
+    saveSettings()
+end)
+
+local endlessSwitch = createMiniSwitch(dgFilterCard, "DungeonEndlessSwitch", "Endless Tower", 3, function(state)
+    config.DungeonEndless = state
     saveSettings()
 end)
 
 -- Segmented Difficulty Selector Card
 local diffCard = Instance.new("Frame")
 diffCard.Name = "DiffCard"
-diffCard.Size = UDim2.new(1, 0, 0, 66)
+diffCard.Size = UDim2.new(1, 0, 0, 62)
 diffCard.BackgroundColor3 = THEME.Surface
 diffCard.BorderSizePixel = 0
-diffCard.LayoutOrder = 3
+diffCard.LayoutOrder = 4
 diffCard.Parent = dungeonPage
 Instance.new("UICorner", diffCard).CornerRadius = UDim.new(0, 10)
 local diffCardStroke = Instance.new("UIStroke", diffCard)
@@ -1608,7 +1739,7 @@ end)
 -- ========================================================
 local timerPanel = Instance.new("Frame", mainFrame)
 timerPanel.Name = "AllBossTimerPanel"
-timerPanel.Size = UDim2.new(0, 276, 0, 392)
+timerPanel.Size = UDim2.new(0, 276, 0, 406)
 timerPanel.Position = UDim2.new(0, -284, 0, 0)
 timerPanel.BackgroundColor3 = THEME.Bg
 timerPanel.BorderSizePixel = 0
@@ -1972,7 +2103,11 @@ attackSwitch.SetState(config.AutoAttack, false)
 sprintSwitch.SetState(config.AutoSprint, false)
 chestSwitch.SetState(config.AutoChest, false)
 replaySwitch.SetState(config.AutoReplay, false)
+rejoinSwitch.SetState(config.AutoRejoin, false)
 autoDungeonSwitch.SetState(config.AutoDungeon, false)
+cryptSwitch.SetState(config.DungeonCrypt ~= false, false)
+goldSwitch.SetState(config.DungeonGold ~= false, false)
+endlessSwitch.SetState(config.DungeonEndless ~= false, false)
 updateActiveBadge()
 
 setActiveTab(config.ActiveTab or "Farm", false)
@@ -2163,6 +2298,52 @@ task.spawn(function()
     while true do
         task.wait(0.3)
         updateBossStatusUI()
+    end
+end)
+
+-- 7. Auto Rejoin on Disconnect / Network Drop
+local isRejoining = false
+local function triggerAutoRejoin()
+    if not config.AutoRejoin or isRejoining then return end
+    isRejoining = true
+
+    task.spawn(function()
+        while config.AutoRejoin do
+            local ok = pcall(function()
+                if #Players:GetPlayers() <= 1 then
+                    TeleportService:Teleport(game.PlaceId, player)
+                else
+                    TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, player)
+                end
+            end)
+            if not ok then
+                pcall(function()
+                    TeleportService:Teleport(game.PlaceId, player)
+                end)
+            end
+            task.wait(3)
+        end
+        isRejoining = false
+    end)
+end
+
+pcall(function()
+    GuiService.ErrorMessageChanged:Connect(function(msg)
+        if config.AutoRejoin and msg and msg ~= "" then
+            triggerAutoRejoin()
+        end
+    end)
+end)
+
+pcall(function()
+    local promptOverlay = game:GetService("CoreGui"):WaitForChild("RobloxPromptGui", 5)
+        and game:GetService("CoreGui").RobloxPromptGui:FindFirstChild("promptOverlay")
+    if promptOverlay then
+        promptOverlay.ChildAdded:Connect(function(child)
+            if config.AutoRejoin and child.Name == "ErrorPrompt" then
+                triggerAutoRejoin()
+            end
+        end)
     end
 end)
 
