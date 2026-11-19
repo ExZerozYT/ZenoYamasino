@@ -1,6 +1,7 @@
 -- ========================================================
--- mine.lua
--- Combined Pet Hunt Party + Auto Dungeon Hub
+-- PetHuntHub.lua
+-- Language: Luau | Platform: Roblox (Executor) | Target: Pet Hunt Party
+-- Unified Hub: Farm + Auto Dungeon + Boss Tracker
 -- ========================================================
 
 -- Services
@@ -10,30 +11,33 @@ local TweenService = game:GetService("TweenService")
 local HttpService = game:GetService("HttpService")
 local UserInputService = game:GetService("UserInputService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+local TeleportService = game:GetService("TeleportService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
 -- ========================================================
--- โฟลเดอร์และไฟล์บันทึกการตั้งค่าใน executor workspace (x2shifthub)
+-- Settings & Persistence (x2shifthub)
 -- ========================================================
 local SETTINGS_FOLDER = "x2shifthub"
-local SETTINGS_FILE = SETTINGS_FOLDER .. "/mine_config.json"
+local SETTINGS_FILE = SETTINGS_FOLDER .. "/pethunt_hub_config.json"
 
 local config = {
-    -- Pet Hunt Party
+    -- Farm
     AutoAttack = false,
     AutoSprint = false,
     AutoChest = false,
     AutoReplay = false,
-    -- Auto Dungeon
+    -- Dungeon
     AutoDungeon = false,
     SelectedDungeon = "all",
     PreferredDiff = "highest",
-    AutoBuyKeys = false,
+    -- Boss
+    SelectedBoss = "Birdbath Owl",
     -- UI
+    ActiveTab = "Farm",
     GuiPos = nil,
-    GuiCollapsed = false
+    GuiCollapsed = false,
 }
 
 local function loadSettings()
@@ -68,7 +72,7 @@ end
 loadSettings()
 
 -- ========================================================
--- ตรวจสอบว่าอยู่ในดันเจี้ยนหรือไม่ (ใช้ร่วมกันทั้งเปิดกล่องและลงดัน)
+-- Dungeon Detection
 -- ========================================================
 local function isInsideDungeon()
     local attr = player:GetAttribute("Dungeon") or player:GetAttribute("InDungeon")
@@ -111,7 +115,7 @@ local function isInsideDungeon()
 end
 
 -- ========================================================
--- แคช UI Elements ของเกม (Auto Attack & Sprint)
+-- Game UI Cache (Auto Attack & Sprint)
 -- ========================================================
 local cachedAutoBtn = nil
 local cachedSprintBtn = nil
@@ -267,7 +271,7 @@ local function setGameSprintState(targetState)
 end
 
 -- ========================================================
--- ลอจิกเปิดกล่องปาร์ตี้ & กล่องบอสดันเจี้ยน (E)
+-- Auto Chest Party & Dungeon Chest (E)
 -- ========================================================
 local isMovingToChest = false
 local CHEST_MAX_DISTANCE_WORLD = 80
@@ -341,7 +345,7 @@ local function triggerOpenPartyChest()
             workspace:FindFirstChild("Drops"),
             workspace:FindFirstChild("Chests"),
             workspace:FindFirstChild("Debris"),
-            workspace:FindFirstChild("Tower")
+            workspace:FindFirstChild("Tower"),
         }
 
         for _, container in ipairs(dungeonContainers) do
@@ -445,7 +449,7 @@ local function triggerOpenPartyChest()
 end
 
 -- ========================================================
--- ลอจิก Auto Replay (DungeonPopup & WorldBossResults)
+-- Auto Replay
 -- ========================================================
 local function triggerReplayButton()
     pcall(function()
@@ -454,7 +458,7 @@ local function triggerReplayButton()
 
         local popups = {
             root:FindFirstChild("DungeonPopup"),
-            root:FindFirstChild("WorldBossResults")
+            root:FindFirstChild("WorldBossResults"),
         }
 
         for _, popup in ipairs(popups) do
@@ -501,7 +505,7 @@ local function triggerReplayButton()
 end
 
 -- ========================================================
--- ลอจิก Auto Dungeon (Dynamic Metadata & Net Interface)
+-- Auto Dungeon Logic
 -- ========================================================
 local function getDungeonsConfig()
     local success, res = pcall(function()
@@ -546,7 +550,6 @@ local function getAvailableDungeons()
     if not Dungeons or not Dungeons.list then return {} end
 
     local myLevel = player:GetAttribute("Level") or 1
-    local myGold = player:GetAttribute("Gold") or 0
     local available = {}
 
     local state = invokeDungeon("state")
@@ -573,8 +576,6 @@ local function getAvailableDungeons()
             local canRun = (runsLeft > 0)
             if not canRun and d.keys == true then
                 if keys > 0 then
-                    canRun = true
-                elseif config.AutoBuyKeys and myGold >= (d.keyPrice or Dungeons.keyPrice or 250000) then
                     canRun = true
                 end
             end
@@ -619,7 +620,7 @@ local function getAvailableDungeons()
                     dungeon = d,
                     diff = chosenDiff,
                     runsLeft = runsLeft,
-                    hasKeys = keys > 0
+                    hasKeys = keys > 0,
                 })
             end
         end
@@ -651,13 +652,6 @@ local function tryEnterDungeon()
 
         if not targetEntry then return end
 
-        if targetEntry.dungeon.keys and not (targetEntry.runsLeft > 0) and not targetEntry.hasKeys then
-            if config.AutoBuyKeys then
-                invokeDungeon("buyKey")
-                task.wait(0.5)
-            end
-        end
-
         local res = invokeDungeon("enter", targetEntry.dungeon.id, targetEntry.diff.id)
         if res and res.ok then
             if res.waiting then
@@ -671,10 +665,177 @@ local function tryEnterDungeon()
 end
 
 -- ========================================================
--- สร้างหน้าต่างเมนูรวม (Mine Hub UI)
+-- Boss Data, Status & Flight System
 -- ========================================================
+local knownBossMap = {
+    ["Birdbath Owl"] = { id = "birdbath_owl", field = "Field_backyard", level = 12 },
+    ["Teacup Unicorn"] = { id = "teacup_unicorn", field = "Field_cafe", level = 22 },
+    ["Lighthouse Narwhal"] = { id = "lighthouse_narwhal", field = "Field_splash", level = 32 },
+    ["Rocking Pegasus"] = { id = "rocking_pegasus", field = "Field_toy", level = 42 },
+    ["Crystal Qilin"] = { id = "crystal_qilin", field = "Field_gem", level = 52 },
+    ["Snowflake Reindeer"] = { id = "snowflake_reindeer", field = "Field_snow", level = 62 },
+    ["Eclipse Wolf"] = { id = "eclipse_wolf", field = "Field_moon", level = 70 },
+    ["Thunderbird"] = { id = "thunderbird", field = "Field_sky", level = 77 },
+    ["Golden Mask Jaguar"] = { id = "golden_mask_jaguar", field = "Field_jungle", level = 84 },
+    ["Neon Motorbike Cheetah"] = { id = "neon_motorbike_cheetah", field = "Field_neon", level = 90 },
+    ["Grimoire Griffin"] = { id = "grimoire_griffin", field = "Field_wizard", level = 95 },
+    ["Erupting Volcano Tortoise"] = { id = "erupting_volcano_tortoise", field = "Field_volcano", level = 99 },
+    ["Bramble Crown Bear"] = { id = "bramble_crown_bear", field = "Field_grove", level = 99 },
+    ["Tempest Bell Roc"] = { id = "tempest_bell_roc", field = "Field_gale", level = 99 },
+    ["Wishing Well Crocodile"] = { id = "wishing_well_crocodile", field = "Field_mist", level = 99 },
+    ["Ember Obelisk Cobra"] = { id = "ember_obelisk_cobra", field = "Field_ember", level = 99 },
+    ["Heartwood Shrine Yak"] = { id = "heartwood_shrine_yak", field = "Field_heart", level = 99 },
+}
+
+local function loadBossConfig()
+    pcall(function()
+        local mConfig = require(ReplicatedStorage.Shared.Config.Monsters)
+        if mConfig and mConfig.defs then
+            for id, data in pairs(mConfig.defs) do
+                if data.isBoss and data.name and not id:find("^dg_") then
+                    if knownBossMap[data.name] then
+                        knownBossMap[data.name].id = id
+                        knownBossMap[data.name].level = data.level or knownBossMap[data.name].level
+                    else
+                        knownBossMap[data.name] = {
+                            id = id,
+                            field = "Field_" .. (data.set or "custom"),
+                            level = data.level or 1,
+                        }
+                    end
+                end
+            end
+        end
+    end)
+end
+loadBossConfig()
+
+local function scanDynamicBosses()
+    pcall(function()
+        local monstersFolder = workspace:FindFirstChild("Monsters")
+        if not monstersFolder then return end
+
+        local counts = {}
+        for _, m in ipairs(monstersFolder:GetChildren()) do
+            if m:IsA("Model") then
+                counts[m.Name] = (counts[m.Name] or 0) + 1
+            end
+        end
+
+        for _, m in ipairs(monstersFolder:GetChildren()) do
+            if m:IsA("Model") and counts[m.Name] == 1 and not knownBossMap[m.Name] then
+                local lvl = m:GetAttribute("Level") or 1
+                knownBossMap[m.Name] = { field = "Field_Custom", level = lvl }
+            end
+        end
+    end)
+end
+scanDynamicBosses()
+
+local function getBossLevel(bossName)
+    local info = knownBossMap[bossName]
+    if info and info.level then return info.level end
+    local monsters = workspace:FindFirstChild("Monsters")
+    if monsters then
+        local m = monsters:FindFirstChild(bossName)
+        if m then
+            local lvl = m:GetAttribute("Level")
+            if lvl then return lvl end
+        end
+    end
+    return nil
+end
+
+local function getBossDisplayName(bossName)
+    local lvl = getBossLevel(bossName)
+    if lvl then
+        return string.format("%s  [Lv.%d]", bossName, lvl)
+    end
+    return bossName
+end
+
+local function getBossModel(bossName)
+    local monsters = workspace:FindFirstChild("Monsters")
+    if not monsters then return nil end
+    local m = monsters:FindFirstChild(bossName)
+    if m and m:IsA("Model") then return m end
+    return nil
+end
+
+local function getBossId(bossName)
+    local info = knownBossMap[bossName]
+    if info and info.id then return info.id end
+    return bossName:lower():gsub("%s+", "_")
+end
+
+local function getBossRespawnRemaining(bossName)
+    local monsters = workspace:FindFirstChild("Monsters")
+    if not monsters then return nil end
+    local attrName = "BossBack_" .. getBossId(bossName)
+    local respawnAt = monsters:GetAttribute(attrName)
+    if type(respawnAt) == "number" then
+        local now = workspace:GetServerTimeNow()
+        local rem = math.ceil(respawnAt - now)
+        if rem > 0 then
+            return rem
+        end
+    end
+    return nil
+end
+
+local function formatCountdown(seconds)
+    seconds = math.max(0, math.floor(seconds))
+    local hrs = math.floor(seconds / 3600)
+    local mins = math.floor((seconds % 3600) / 60)
+    local secs = seconds % 60
+    if hrs > 0 then
+        return string.format("%02d:%02d:%02d", hrs, mins, secs)
+    end
+    return string.format("%02d:%02d", mins, secs)
+end
+
+local function getBossStatusInfo(bossName)
+    local bossModel = getBossModel(bossName)
+    if bossModel then
+        local hum = bossModel:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health > 0 then
+            return "ALIVE", "เกิดแล้ว", Color3.fromRGB(52, 211, 153)
+        end
+    end
+
+    local rem = getBossRespawnRemaining(bossName)
+    if rem then
+        return "COOLDOWN", formatCountdown(rem), Color3.fromRGB(251, 191, 36)
+    end
+
+    if bossModel then
+        return "DEAD", "ตายแล้ว", Color3.fromRGB(251, 191, 36)
+    end
+
+    return "WAITING", "ยังไม่เกิด", Color3.fromRGB(248, 113, 113)
+end
+
+-- ========================================================
+-- Redesigned Modern Hub UI (Dark Slate + Cyan/Emerald)
+-- ========================================================
+local THEME = {
+    Bg          = Color3.fromRGB(15, 17, 23),
+    Surface     = Color3.fromRGB(22, 25, 34),
+    SurfaceHi   = Color3.fromRGB(30, 35, 48),
+    Border      = Color3.fromRGB(44, 50, 68),
+    BorderHi    = Color3.fromRGB(68, 78, 106),
+    TextPrimary = Color3.fromRGB(241, 245, 249),
+    TextMuted   = Color3.fromRGB(148, 163, 184),
+    Accent      = Color3.fromRGB(56, 189, 248),
+    AccentDim   = Color3.fromRGB(24, 58, 82),
+    Green       = Color3.fromRGB(52, 211, 153),
+    Amber       = Color3.fromRGB(251, 191, 36),
+    Red         = Color3.fromRGB(248, 113, 113),
+    TrackOff    = Color3.fromRGB(45, 51, 66),
+}
+
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "x2shift_MineGui"
+screenGui.Name = "x2shift_PetHuntHub"
 screenGui.ResetOnSpawn = false
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
@@ -687,245 +848,384 @@ else
     screenGui.Parent = playerGui
 end
 
-for _, oldName in ipairs({ "x2shift_MineGui", "x2shift_ButtonsGui", "x2shift_AutoDungeonGui", "x2shift_AutoHub" }) do
+for _, oldName in ipairs({
+    "x2shift_PetHuntHub",
+    "x2shift_MineGui",
+    "x2shift_BossTrackerGui",
+    "x2shift_ButtonsGui",
+    "x2shift_AutoDungeonGui",
+    "x2shift_AutoHub",
+}) do
     local old = screenGui.Parent:FindFirstChild(oldName)
     if old and old ~= screenGui then
         old:Destroy()
     end
 end
 
-local EXPANDED_SIZE = UDim2.new(0, 260, 0, 444)
-local COLLAPSED_SIZE = UDim2.new(0, 260, 0, 38)
+local EXPANDED_SIZE = UDim2.new(0, 310, 0, 392)
+local COLLAPSED_SIZE = UDim2.new(0, 310, 0, 44)
 
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainFrame"
 mainFrame.Size = config.GuiCollapsed and COLLAPSED_SIZE or EXPANDED_SIZE
-mainFrame.ClipsDescendants = true
+mainFrame.BackgroundColor3 = THEME.Bg
+mainFrame.BorderSizePixel = 0
+mainFrame.ClipsDescendants = false
+mainFrame.Parent = screenGui
 
-local defaultGuiPos = UDim2.new(0.80, 0, 0.25, 0)
+local defaultGuiPos = UDim2.new(0.75, 0, 0.22, 0)
 if config.GuiPos and type(config.GuiPos) == "table" then
     defaultGuiPos = UDim2.new(
-        config.GuiPos.XScale or 0.80,
+        config.GuiPos.XScale or 0.75,
         config.GuiPos.XOffset or 0,
-        config.GuiPos.YScale or 0.25,
+        config.GuiPos.YScale or 0.22,
         config.GuiPos.YOffset or 0
     )
 end
 mainFrame.Position = defaultGuiPos
-mainFrame.BackgroundColor3 = Color3.fromRGB(22, 24, 30)
-mainFrame.BorderSizePixel = 0
-mainFrame.Active = true
-mainFrame.Draggable = true
-mainFrame.Parent = screenGui
 
 local mainCorner = Instance.new("UICorner")
-mainCorner.CornerRadius = UDim.new(0, 12)
+mainCorner.CornerRadius = UDim.new(0, 14)
 mainCorner.Parent = mainFrame
 
 local mainStroke = Instance.new("UIStroke")
-mainStroke.Color = Color3.fromRGB(50, 54, 66)
+mainStroke.Color = THEME.Border
 mainStroke.Thickness = 1.5
 mainStroke.Parent = mainFrame
 
-mainFrame.DragStopped:Connect(function()
-    config.GuiPos = {
-        XScale = mainFrame.Position.X.Scale,
-        XOffset = mainFrame.Position.X.Offset,
-        YScale = mainFrame.Position.Y.Scale,
-        YOffset = mainFrame.Position.Y.Offset
-    }
-    saveSettings()
-end)
-
--- Header Bar
+-- ========================================================
+-- Header + Custom Smooth Dragging
+-- ========================================================
 local header = Instance.new("Frame")
 header.Name = "Header"
-header.Size = UDim2.new(1, 0, 0, 38)
-header.BackgroundColor3 = Color3.fromRGB(28, 30, 38)
+header.Size = UDim2.new(1, 0, 0, 44)
+header.BackgroundColor3 = THEME.Surface
 header.BorderSizePixel = 0
 header.Parent = mainFrame
 
 local headerCorner = Instance.new("UICorner")
-headerCorner.CornerRadius = UDim.new(0, 12)
+headerCorner.CornerRadius = UDim.new(0, 14)
 headerCorner.Parent = header
 
-local headerCover = Instance.new("Frame")
-headerCover.Name = "HeaderCover"
-headerCover.Size = UDim2.new(1, 0, 0, 10)
-headerCover.Position = UDim2.new(0, 0, 1, -10)
-headerCover.BackgroundColor3 = Color3.fromRGB(28, 30, 38)
-headerCover.BorderSizePixel = 0
-headerCover.Parent = header
+local headerMask = Instance.new("Frame")
+headerMask.Name = "HeaderMask"
+headerMask.Size = UDim2.new(1, 0, 0, 14)
+headerMask.Position = UDim2.new(0, 0, 1, -14)
+headerMask.BackgroundColor3 = THEME.Surface
+headerMask.BorderSizePixel = 0
+headerMask.Visible = not config.GuiCollapsed
+headerMask.Parent = header
+
+local headerDivider = Instance.new("Frame")
+headerDivider.Size = UDim2.new(1, 0, 0, 1)
+headerDivider.Position = UDim2.new(0, 0, 1, -1)
+headerDivider.BackgroundColor3 = THEME.Border
+headerDivider.BorderSizePixel = 0
+headerDivider.Visible = not config.GuiCollapsed
+headerDivider.Parent = header
+
+-- Accent dot
+local brandDot = Instance.new("Frame")
+brandDot.Size = UDim2.new(0, 8, 0, 8)
+brandDot.Position = UDim2.new(0, 14, 0.5, -4)
+brandDot.BackgroundColor3 = THEME.Accent
+brandDot.BorderSizePixel = 0
+brandDot.Parent = header
+Instance.new("UICorner", brandDot).CornerRadius = UDim.new(1, 0)
 
 local titleLabel = Instance.new("TextLabel")
 titleLabel.Name = "TitleLabel"
-titleLabel.Size = UDim2.new(1, -54, 1, 0)
-titleLabel.Position = UDim2.new(0, 14, 0, 0)
+titleLabel.Size = UDim2.new(1, -130, 1, 0)
+titleLabel.Position = UDim2.new(0, 28, 0, 0)
 titleLabel.BackgroundTransparency = 1
-titleLabel.Text = "⚡ Mine Hub (Party + Dungeon)"
-titleLabel.Font = Enum.Font.FredokaOne
-titleLabel.TextSize = 14
-titleLabel.TextColor3 = Color3.fromRGB(240, 240, 245)
+titleLabel.Text = "Zeno Yamasino hub"
+titleLabel.Font = Enum.Font.GothamBlack
+titleLabel.TextSize = 13
+titleLabel.TextColor3 = THEME.TextPrimary
 titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.Parent = header
 
+-- Active count badge
+local activeBadge = Instance.new("TextLabel")
+activeBadge.Name = "ActiveBadge"
+activeBadge.Size = UDim2.new(0, 58, 0, 20)
+activeBadge.Position = UDim2.new(1, -98, 0.5, -10)
+activeBadge.BackgroundColor3 = THEME.AccentDim
+activeBadge.BorderSizePixel = 0
+activeBadge.Text = "0 ON"
+activeBadge.Font = Enum.Font.GothamBold
+activeBadge.TextSize = 10
+activeBadge.TextColor3 = THEME.Accent
+activeBadge.Parent = header
+Instance.new("UICorner", activeBadge).CornerRadius = UDim.new(1, 0)
+
+-- Collapse Button
 local collapseBtn = Instance.new("TextButton")
 collapseBtn.Name = "CollapseBtn"
-collapseBtn.Size = UDim2.new(0, 24, 0, 24)
-collapseBtn.Position = UDim2.new(1, -32, 0.5, -12)
-collapseBtn.BackgroundColor3 = Color3.fromRGB(45, 49, 62)
+collapseBtn.Size = UDim2.new(0, 26, 0, 26)
+collapseBtn.Position = UDim2.new(1, -34, 0.5, -13)
+collapseBtn.BackgroundColor3 = THEME.SurfaceHi
 collapseBtn.BorderSizePixel = 0
 collapseBtn.Text = config.GuiCollapsed and "+" or "−"
 collapseBtn.Font = Enum.Font.GothamBold
-collapseBtn.TextSize = 16
-collapseBtn.TextColor3 = Color3.fromRGB(235, 235, 240)
+collapseBtn.TextSize = 15
+collapseBtn.TextColor3 = THEME.TextPrimary
 collapseBtn.Parent = header
+Instance.new("UICorner", collapseBtn).CornerRadius = UDim.new(0, 7)
 
-local collapseCorner = Instance.new("UICorner")
-collapseCorner.CornerRadius = UDim.new(0, 6)
-collapseCorner.Parent = collapseBtn
+-- Smooth Drag on Header
+do
+    local dragging = false
+    local dragStart, startPos
 
-local contentList = Instance.new("Frame")
-contentList.Name = "ContentList"
-contentList.Size = UDim2.new(1, -20, 1, -48)
-contentList.Position = UDim2.new(0, 10, 0, 44)
-contentList.BackgroundTransparency = 1
-contentList.Visible = not config.GuiCollapsed
-contentList.Parent = mainFrame
-
-headerCover.Visible = not config.GuiCollapsed
-
-local collapseTween = nil
-local function setCollapsed(collapsed, animate)
-    config.GuiCollapsed = collapsed
-    collapseBtn.Text = collapsed and "+" or "−"
-    headerCover.Visible = not collapsed
-
-    if collapseTween then
-        collapseTween:Cancel()
-        collapseTween = nil
-    end
-
-    local targetSize = collapsed and COLLAPSED_SIZE or EXPANDED_SIZE
-    if animate then
-        if not collapsed then
-            contentList.Visible = true
+    header.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = mainFrame.Position
         end
-        collapseTween = TweenService:Create(
-            mainFrame,
-            TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-            { Size = targetSize }
-        )
-        collapseTween.Completed:Connect(function()
-            if config.GuiCollapsed then
-                contentList.Visible = false
-            end
-        end)
-        collapseTween:Play()
-    else
-        mainFrame.Size = targetSize
-        contentList.Visible = not collapsed
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            mainFrame.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            config.GuiPos = {
+                XScale = mainFrame.Position.X.Scale,
+                XOffset = mainFrame.Position.X.Offset,
+                YScale = mainFrame.Position.Y.Scale,
+                YOffset = mainFrame.Position.Y.Offset,
+            }
+            saveSettings()
+        end
+    end)
+end
+
+-- ========================================================
+-- Body Container (Clipped when collapsed)
+-- ========================================================
+local bodyContainer = Instance.new("Frame")
+bodyContainer.Name = "BodyContainer"
+bodyContainer.Size = UDim2.new(1, 0, 1, -44)
+bodyContainer.Position = UDim2.new(0, 0, 0, 44)
+bodyContainer.BackgroundTransparency = 1
+bodyContainer.Visible = not config.GuiCollapsed
+bodyContainer.Parent = mainFrame
+
+-- ========================================================
+-- Segmented Tab Bar (Farm | Dungeon | Boss)
+-- ========================================================
+local tabBar = Instance.new("Frame")
+tabBar.Name = "TabBar"
+tabBar.Size = UDim2.new(1, -24, 0, 34)
+tabBar.Position = UDim2.new(0, 12, 0, 10)
+tabBar.BackgroundColor3 = THEME.Surface
+tabBar.BorderSizePixel = 0
+tabBar.Parent = bodyContainer
+Instance.new("UICorner", tabBar).CornerRadius = UDim.new(0, 9)
+local tabBarStroke = Instance.new("UIStroke", tabBar)
+tabBarStroke.Color = THEME.Border
+tabBarStroke.Thickness = 1
+
+local tabLayout = Instance.new("UIListLayout")
+tabLayout.FillDirection = Enum.FillDirection.Horizontal
+tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+tabLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+tabLayout.Padding = UDim.new(0, 4)
+tabLayout.Parent = tabBar
+
+local tabPadding = Instance.new("UIPadding", tabBar)
+tabPadding.PaddingLeft = UDim.new(0, 4)
+tabPadding.PaddingRight = UDim.new(0, 4)
+
+local tabButtons = {}
+local tabPages = {}
+
+local pagesHolder = Instance.new("Frame")
+pagesHolder.Name = "PagesHolder"
+pagesHolder.Size = UDim2.new(1, -24, 1, -66)
+pagesHolder.Position = UDim2.new(0, 12, 0, 54)
+pagesHolder.BackgroundTransparency = 1
+pagesHolder.Parent = bodyContainer
+
+local function createTab(id, labelText, order)
+    local btn = Instance.new("TextButton")
+    btn.Name = "Tab_" .. id
+    btn.Size = UDim2.new(1/3, -3, 0, 26)
+    btn.BackgroundColor3 = THEME.Surface
+    btn.BorderSizePixel = 0
+    btn.AutoButtonColor = false
+    btn.Text = labelText
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 11
+    btn.TextColor3 = THEME.TextMuted
+    btn.LayoutOrder = order
+    btn.Parent = tabBar
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
+
+    local page = Instance.new("Frame")
+    page.Name = "Page_" .. id
+    page.Size = UDim2.new(1, 0, 1, 0)
+    page.BackgroundTransparency = 1
+    page.Visible = false
+    page.Parent = pagesHolder
+
+    tabButtons[id] = btn
+    tabPages[id] = page
+    return page
+end
+
+local farmPage = createTab("Farm", "Farm", 1)
+local dungeonPage = createTab("Dungeon", "Dungeon", 2)
+local bossPage = createTab("Boss", "Boss", 3)
+
+local function setActiveTab(tabId, save)
+    if not tabPages[tabId] then tabId = "Farm" end
+    config.ActiveTab = tabId
+    for id, page in pairs(tabPages) do
+        local isSelected = (id == tabId)
+        page.Visible = isSelected
+        local btn = tabButtons[id]
+        TweenService:Create(btn, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            BackgroundColor3 = isSelected and THEME.AccentDim or THEME.Surface,
+            TextColor3 = isSelected and THEME.Accent or THEME.TextMuted,
+        }):Play()
+    end
+    if save then
+        saveSettings()
     end
 end
 
-collapseBtn.MouseButton1Click:Connect(function()
-    setCollapsed(not config.GuiCollapsed, true)
-    saveSettings()
-end)
+for id, btn in pairs(tabButtons) do
+    btn.MouseButton1Click:Connect(function()
+        setActiveTab(id, true)
+    end)
+end
 
-local uilist = Instance.new("UIListLayout")
-uilist.Padding = UDim.new(0, 8)
-uilist.SortOrder = Enum.SortOrder.LayoutOrder
-uilist.Parent = contentList
+-- Footer hint
+local footerHint = Instance.new("TextLabel")
+footerHint.Size = UDim2.new(1, -24, 0, 14)
+footerHint.Position = UDim2.new(0, 12, 1, -16)
+footerHint.BackgroundTransparency = 1
+footerHint.Text = "RightCtrl: ซ่อน/แสดงหน้าต่าง  •  x2shifthub"
+footerHint.Font = Enum.Font.Gotham
+footerHint.TextSize = 10
+footerHint.TextColor3 = THEME.TextMuted
+footerHint.TextXAlignment = Enum.TextXAlignment.Center
+footerHint.Parent = bodyContainer
 
--- Switch Component Helper
-local function createSwitch(name, titleText, descText, layoutOrder, onToggleCallback)
+-- ========================================================
+-- Active Badge Updater
+-- ========================================================
+local function updateActiveBadge()
+    local count = 0
+    if config.AutoAttack then count += 1 end
+    if config.AutoSprint then count += 1 end
+    if config.AutoChest then count += 1 end
+    if config.AutoReplay then count += 1 end
+    if config.AutoDungeon then count += 1 end
+
+    activeBadge.Text = count .. " ON"
+    if count > 0 then
+        activeBadge.BackgroundColor3 = Color3.fromRGB(16, 56, 44)
+        activeBadge.TextColor3 = THEME.Green
+    else
+        activeBadge.BackgroundColor3 = THEME.SurfaceHi
+        activeBadge.TextColor3 = THEME.TextMuted
+    end
+end
+
+-- ========================================================
+-- Reusable Modern Switch Component
+-- ========================================================
+local function createSwitch(parent, name, titleText, descText, layoutOrder, onToggleCallback)
     local row = Instance.new("TextButton")
     row.Name = name
-    row.Size = UDim2.new(1, 0, 0, 48)
-    row.BackgroundColor3 = Color3.fromRGB(30, 33, 42)
+    row.Size = UDim2.new(1, 0, 0, 52)
+    row.BackgroundColor3 = THEME.Surface
     row.BorderSizePixel = 0
     row.AutoButtonColor = false
     row.Text = ""
     row.LayoutOrder = layoutOrder
-    row.Parent = contentList
+    row.Parent = parent
 
-    local rowCorner = Instance.new("UICorner")
-    rowCorner.CornerRadius = UDim.new(0, 8)
-    rowCorner.Parent = row
-
-    local rowStroke = Instance.new("UIStroke")
-    rowStroke.Color = Color3.fromRGB(42, 46, 58)
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 10)
+    local rowStroke = Instance.new("UIStroke", row)
+    rowStroke.Color = THEME.Border
     rowStroke.Thickness = 1
-    rowStroke.Parent = row
 
     local label = Instance.new("TextLabel")
     label.Name = "Label"
-    label.Size = UDim2.new(1, -66, 0, 20)
-    label.Position = UDim2.new(0, 10, 0, 6)
+    label.Size = UDim2.new(1, -68, 0, 20)
+    label.Position = UDim2.new(0, 12, 0, 7)
     label.BackgroundTransparency = 1
     label.Text = titleText
     label.Font = Enum.Font.GothamBold
-    label.TextSize = 13
-    label.TextColor3 = Color3.fromRGB(235, 235, 240)
+    label.TextSize = 12
+    label.TextColor3 = THEME.TextPrimary
     label.TextXAlignment = Enum.TextXAlignment.Left
     label.Parent = row
 
     local subLabel = Instance.new("TextLabel")
     subLabel.Name = "SubLabel"
-    subLabel.Size = UDim2.new(1, -66, 0, 16)
-    subLabel.Position = UDim2.new(0, 10, 0, 26)
+    subLabel.Size = UDim2.new(1, -68, 0, 16)
+    subLabel.Position = UDim2.new(0, 12, 0, 28)
     subLabel.BackgroundTransparency = 1
     subLabel.Text = descText
     subLabel.Font = Enum.Font.Gotham
-    subLabel.TextSize = 11
-    subLabel.TextColor3 = Color3.fromRGB(150, 155, 170)
+    subLabel.TextSize = 10
+    subLabel.TextColor3 = THEME.TextMuted
     subLabel.TextXAlignment = Enum.TextXAlignment.Left
     subLabel.Parent = row
 
-    local switchTrack = Instance.new("Frame")
-    switchTrack.Name = "SwitchTrack"
-    switchTrack.Size = UDim2.new(0, 44, 0, 24)
-    switchTrack.Position = UDim2.new(1, -52, 0.5, -12)
-    switchTrack.BackgroundColor3 = Color3.fromRGB(48, 52, 65)
-    switchTrack.BorderSizePixel = 0
-    switchTrack.Parent = row
+    local track = Instance.new("Frame")
+    track.Name = "Track"
+    track.Size = UDim2.new(0, 42, 0, 22)
+    track.Position = UDim2.new(1, -54, 0.5, -11)
+    track.BackgroundColor3 = THEME.TrackOff
+    track.BorderSizePixel = 0
+    track.Parent = row
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
 
-    local trackCorner = Instance.new("UICorner")
-    trackCorner.CornerRadius = UDim.new(1, 0)
-    trackCorner.Parent = switchTrack
-
-    local switchThumb = Instance.new("Frame")
-    switchThumb.Name = "SwitchThumb"
-    switchThumb.Size = UDim2.new(0, 18, 0, 18)
-    switchThumb.Position = UDim2.new(0, 3, 0.5, -9)
-    switchThumb.BackgroundColor3 = Color3.fromRGB(200, 205, 215)
-    switchThumb.BorderSizePixel = 0
-    switchThumb.Parent = switchTrack
-
-    local thumbCorner = Instance.new("UICorner")
-    thumbCorner.CornerRadius = UDim.new(1, 0)
-    thumbCorner.Parent = switchThumb
+    local thumb = Instance.new("Frame")
+    thumb.Name = "Thumb"
+    thumb.Size = UDim2.new(0, 16, 0, 16)
+    thumb.Position = UDim2.new(0, 3, 0.5, -8)
+    thumb.BackgroundColor3 = Color3.fromRGB(203, 213, 225)
+    thumb.BorderSizePixel = 0
+    thumb.Parent = track
+    Instance.new("UICorner", thumb).CornerRadius = UDim.new(1, 0)
 
     local isEnabled = false
 
     local function setVisual(state, animate)
         isEnabled = state
-        local targetTrackColor = isEnabled and Color3.fromRGB(46, 204, 113) or Color3.fromRGB(48, 52, 65)
-        local targetThumbColor = isEnabled and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(200, 205, 215)
-        local targetThumbPos = isEnabled and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9)
+        local tTrack = state and THEME.Green or THEME.TrackOff
+        local tThumb = state and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(203, 213, 225)
+        local tPos = state and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+        local tStroke = state and Color3.fromRGB(36, 98, 76) or THEME.Border
 
         if animate then
-            local tweenInfo = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-            TweenService:Create(switchTrack, tweenInfo, { BackgroundColor3 = targetTrackColor }):Play()
-            TweenService:Create(switchThumb, tweenInfo, {
-                Position = targetThumbPos,
-                BackgroundColor3 = targetThumbColor
-            }):Play()
+            local ti = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+            TweenService:Create(track, ti, { BackgroundColor3 = tTrack }):Play()
+            TweenService:Create(thumb, ti, { Position = tPos, BackgroundColor3 = tThumb }):Play()
+            TweenService:Create(rowStroke, ti, { Color = tStroke }):Play()
         else
-            switchTrack.BackgroundColor3 = targetTrackColor
-            switchThumb.BackgroundColor3 = targetThumbColor
-            switchThumb.Position = targetThumbPos
+            track.BackgroundColor3 = tTrack
+            thumb.BackgroundColor3 = tThumb
+            thumb.Position = tPos
+            rowStroke.Color = tStroke
         end
     end
 
@@ -935,128 +1235,751 @@ local function createSwitch(name, titleText, descText, layoutOrder, onToggleCall
         if onToggleCallback then
             onToggleCallback(newState)
         end
+        updateActiveBadge()
     end)
 
     return {
         SetState = function(state, animate)
             if isEnabled ~= state then
                 setVisual(state, animate)
+                updateActiveBadge()
             end
         end,
         GetState = function()
             return isEnabled
-        end
+        end,
     }
 end
 
 -- ========================================================
--- ติดตั้งสวิตช์ทั้งหมด
+-- TAB 1: FARM PAGE
 -- ========================================================
-local attackSwitch = createSwitch("AutoAttackSwitch", "Auto Attack", "คีย์ลัด: [R]", 1, function(newState)
-    config.AutoAttack = newState
+local farmList = Instance.new("UIListLayout", farmPage)
+farmList.Padding = UDim.new(0, 8)
+farmList.SortOrder = Enum.SortOrder.LayoutOrder
+
+local attackSwitch = createSwitch(farmPage, "AutoAttackSwitch", "Auto Attack", "ซิงค์ปุ่มโจมตีอัตโนมัติ  •  คีย์ลัด [R]", 1, function(state)
+    config.AutoAttack = state
     saveSettings()
-    setGameAutoState(newState)
+    setGameAutoState(state)
 end)
 
-local sprintSwitch = createSwitch("AutoSprintSwitch", "Auto Sprint (วิ่ง)", "คีย์ลัด: [Shift]", 2, function(newState)
-    config.AutoSprint = newState
+local sprintSwitch = createSwitch(farmPage, "AutoSprintSwitch", "Auto Sprint", "เปิดวิ่งอัตโนมัติ  •  คีย์ลัด [Shift]", 2, function(state)
+    config.AutoSprint = state
     saveSettings()
-    setGameSprintState(newState)
+    setGameSprintState(state)
 end)
 
-local chestSwitch = createSwitch("AutoChestSwitch", "Auto Chest Party", "คีย์ลัด: [E]", 3, function(newState)
-    config.AutoChest = newState
+local chestSwitch = createSwitch(farmPage, "AutoChestSwitch", "Auto Chest Party", "เดินเก็บกล่องปาร์ตี้ & กล่องบอสดัน [E]", 3, function(state)
+    config.AutoChest = state
     saveSettings()
 end)
 
-local replaySwitch = createSwitch("AutoReplaySwitch", "Auto Replay (เล่นซ้ำ)", "กดเล่นซ้ำทันทีเมื่อจบ", 4, function(newState)
-    config.AutoReplay = newState
+local replaySwitch = createSwitch(farmPage, "AutoReplaySwitch", "Auto Replay", "กดเล่นซ้ำทันทีเมื่อจบดันหรือเวิลด์บอส", 4, function(state)
+    config.AutoReplay = state
     saveSettings()
-    if config.AutoReplay then
+    if state then
         triggerReplayButton()
     end
 end)
 
-local autoDungeonSwitch = createSwitch("AutoDungeonSwitch", "Auto Enter Dungeon", "ลงดันทั้งหมดอัตโนมัติ", 5, function(newState)
-    config.AutoDungeon = newState
+-- ========================================================
+-- TAB 2: DUNGEON PAGE
+-- ========================================================
+local dungeonList = Instance.new("UIListLayout", dungeonPage)
+dungeonList.Padding = UDim.new(0, 8)
+dungeonList.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- Live Dungeon Status Pill
+local dgStatusCard = Instance.new("Frame")
+dgStatusCard.Name = "DgStatusCard"
+dgStatusCard.Size = UDim2.new(1, 0, 0, 38)
+dgStatusCard.BackgroundColor3 = THEME.Surface
+dgStatusCard.BorderSizePixel = 0
+dgStatusCard.LayoutOrder = 1
+dgStatusCard.Parent = dungeonPage
+Instance.new("UICorner", dgStatusCard).CornerRadius = UDim.new(0, 10)
+local dgStroke = Instance.new("UIStroke", dgStatusCard)
+dgStroke.Color = THEME.Border
+dgStroke.Thickness = 1
+
+local dgDot = Instance.new("Frame", dgStatusCard)
+dgDot.Size = UDim2.new(0, 8, 0, 8)
+dgDot.Position = UDim2.new(0, 12, 0.5, -4)
+dgDot.BackgroundColor3 = THEME.Accent
+dgDot.BorderSizePixel = 0
+Instance.new("UICorner", dgDot).CornerRadius = UDim.new(1, 0)
+
+local dgStatusLabel = Instance.new("TextLabel", dgStatusCard)
+dgStatusLabel.Size = UDim2.new(1, -34, 1, 0)
+dgStatusLabel.Position = UDim2.new(0, 28, 0, 0)
+dgStatusLabel.BackgroundTransparency = 1
+dgStatusLabel.Text = "สถานะปัจจุบัน: อยู่ด้านนอก (Lobby)"
+dgStatusLabel.Font = Enum.Font.GothamBold
+dgStatusLabel.TextSize = 11
+dgStatusLabel.TextColor3 = THEME.TextPrimary
+dgStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local autoDungeonSwitch = createSwitch(dungeonPage, "AutoDungeonSwitch", "Auto Enter Dungeon", "เข้าดันเจี้ยนที่ลงได้อัตโนมัติ + กด Join", 2, function(state)
+    config.AutoDungeon = state
     saveSettings()
 end)
 
-local autoKeySwitch = createSwitch("AutoKeySwitch", "Auto Buy Keys", "ซื้อกุญแจอัตโนมัติเมื่อหมด", 6, function(newState)
-    config.AutoBuyKeys = newState
-    saveSettings()
-end)
+-- Segmented Difficulty Selector Card
+local diffCard = Instance.new("Frame")
+diffCard.Name = "DiffCard"
+diffCard.Size = UDim2.new(1, 0, 0, 66)
+diffCard.BackgroundColor3 = THEME.Surface
+diffCard.BorderSizePixel = 0
+diffCard.LayoutOrder = 3
+diffCard.Parent = dungeonPage
+Instance.new("UICorner", diffCard).CornerRadius = UDim.new(0, 10)
+local diffCardStroke = Instance.new("UIStroke", diffCard)
+diffCardStroke.Color = THEME.Border
+diffCardStroke.Thickness = 1
 
--- Difficulty Picker Row
-local diffRow = Instance.new("Frame")
-diffRow.Name = "DiffRow"
-diffRow.Size = UDim2.new(1, 0, 0, 48)
-diffRow.BackgroundColor3 = Color3.fromRGB(30, 33, 42)
-diffRow.BorderSizePixel = 0
-diffRow.LayoutOrder = 7
-diffRow.Parent = contentList
+local diffHeader = Instance.new("TextLabel", diffCard)
+diffHeader.Size = UDim2.new(1, -24, 0, 18)
+diffHeader.Position = UDim2.new(0, 12, 0, 8)
+diffHeader.BackgroundTransparency = 1
+diffHeader.Text = "ระดับความยากที่ต้องการ"
+diffHeader.Font = Enum.Font.GothamBold
+diffHeader.TextSize = 11
+diffHeader.TextColor3 = THEME.TextMuted
+diffHeader.TextXAlignment = Enum.TextXAlignment.Left
 
-local diffCorner = Instance.new("UICorner")
-diffCorner.CornerRadius = UDim.new(0, 8)
-diffCorner.Parent = diffRow
+local diffSegmentHolder = Instance.new("Frame", diffCard)
+diffSegmentHolder.Size = UDim2.new(1, -24, 0, 28)
+diffSegmentHolder.Position = UDim2.new(0, 12, 0, 30)
+diffSegmentHolder.BackgroundColor3 = THEME.Bg
+diffSegmentHolder.BorderSizePixel = 0
+Instance.new("UICorner", diffSegmentHolder).CornerRadius = UDim.new(0, 8)
 
-local diffStroke = Instance.new("UIStroke")
-diffStroke.Color = Color3.fromRGB(42, 46, 58)
-diffStroke.Thickness = 1
-diffStroke.Parent = diffRow
+local diffSegLayout = Instance.new("UIListLayout", diffSegmentHolder)
+diffSegLayout.FillDirection = Enum.FillDirection.Horizontal
+diffSegLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+diffSegLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+diffSegLayout.Padding = UDim.new(0, 4)
 
-local diffLabel = Instance.new("TextLabel")
-diffLabel.Name = "Label"
-diffLabel.Size = UDim2.new(0.48, 0, 1, 0)
-diffLabel.Position = UDim2.new(0, 10, 0, 0)
-diffLabel.BackgroundTransparency = 1
-diffLabel.Text = "ระดับความยาก:"
-diffLabel.Font = Enum.Font.GothamBold
-diffLabel.TextSize = 12
-diffLabel.TextColor3 = Color3.fromRGB(235, 235, 240)
-diffLabel.TextXAlignment = Enum.TextXAlignment.Left
-diffLabel.Parent = diffRow
+local diffButtons = {}
+local diffOptions = {
+    { id = "highest", label = "สูงสุดที่ไหว" },
+    { id = "normal",  label = "Normal" },
+    { id = "hard",    label = "Hard" },
+}
 
-local diffBtn = Instance.new("TextButton")
-diffBtn.Name = "DiffBtn"
-diffBtn.Size = UDim2.new(0.45, 0, 0, 30)
-diffBtn.Position = UDim2.new(0.52, 0, 0.5, -15)
-diffBtn.BackgroundColor3 = Color3.fromRGB(45, 49, 62)
-diffBtn.BorderSizePixel = 0
-diffBtn.Font = Enum.Font.GothamBold
-diffBtn.TextSize = 11
-diffBtn.TextColor3 = Color3.fromRGB(255, 215, 0)
-diffBtn.Parent = diffRow
-
-local diffBtnCorner = Instance.new("UICorner")
-diffBtnCorner.CornerRadius = UDim.new(0, 6)
-diffBtnCorner.Parent = diffBtn
-
-local diffModes = { "highest", "normal", "hard" }
-local diffNames = { highest = "สูงสุดที่ไหว", normal = "ปกติ (Normal)", hard = "ยาก (Hard)" }
-
-local function updateDiffBtn()
-    diffBtn.Text = diffNames[config.PreferredDiff] or "สูงสุดที่ไหว"
+local function updateDiffVisual()
+    for _, opt in ipairs(diffOptions) do
+        local b = diffButtons[opt.id]
+        local active = (config.PreferredDiff == opt.id)
+        b.BackgroundColor3 = active and THEME.AccentDim or Color3.fromRGB(20, 23, 31)
+        b.TextColor3 = active and THEME.Amber or THEME.TextMuted
+    end
 end
-updateDiffBtn()
 
-diffBtn.MouseButton1Click:Connect(function()
-    local curIdx = table.find(diffModes, config.PreferredDiff) or 1
-    local nextIdx = (curIdx % #diffModes) + 1
-    config.PreferredDiff = diffModes[nextIdx]
-    updateDiffBtn()
+for idx, opt in ipairs(diffOptions) do
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1/3, -4, 0, 22)
+    b.BackgroundColor3 = Color3.fromRGB(20, 23, 31)
+    b.BorderSizePixel = 0
+    b.AutoButtonColor = false
+    b.Text = opt.label
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 10
+    b.TextColor3 = THEME.TextMuted
+    b.LayoutOrder = idx
+    b.Parent = diffSegmentHolder
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+
+    diffButtons[opt.id] = b
+    b.MouseButton1Click:Connect(function()
+        config.PreferredDiff = opt.id
+        updateDiffVisual()
+        saveSettings()
+    end)
+end
+updateDiffVisual()
+
+-- ========================================================
+-- TAB 3: BOSS PAGE + ALL TIMERS SIDE PANEL
+-- ========================================================
+-- Boss Dropdown Button
+local dropdownBtn = Instance.new("TextButton")
+dropdownBtn.Name = "DropdownButton"
+dropdownBtn.Size = UDim2.new(1, 0, 0, 36)
+dropdownBtn.Position = UDim2.new(0, 0, 0, 0)
+dropdownBtn.BackgroundColor3 = THEME.Surface
+dropdownBtn.BorderSizePixel = 0
+dropdownBtn.Text = ""
+dropdownBtn.AutoButtonColor = false
+dropdownBtn.ZIndex = 5
+dropdownBtn.Parent = bossPage
+Instance.new("UICorner", dropdownBtn).CornerRadius = UDim.new(0, 10)
+local ddStroke = Instance.new("UIStroke", dropdownBtn)
+ddStroke.Color = THEME.BorderHi
+ddStroke.Thickness = 1
+
+local selectedLabel = Instance.new("TextLabel", dropdownBtn)
+selectedLabel.Size = UDim2.new(1, -38, 1, 0)
+selectedLabel.Position = UDim2.new(0, 12, 0, 0)
+selectedLabel.BackgroundTransparency = 1
+selectedLabel.Text = getBossDisplayName(config.SelectedBoss)
+selectedLabel.Font = Enum.Font.GothamBold
+selectedLabel.TextSize = 12
+selectedLabel.TextColor3 = THEME.TextPrimary
+selectedLabel.TextXAlignment = Enum.TextXAlignment.Left
+selectedLabel.TextTruncate = Enum.TextTruncate.AtEnd
+selectedLabel.ZIndex = 6
+
+local arrowIcon = Instance.new("TextLabel", dropdownBtn)
+arrowIcon.Size = UDim2.new(0, 22, 1, 0)
+arrowIcon.Position = UDim2.new(1, -28, 0, 0)
+arrowIcon.BackgroundTransparency = 1
+arrowIcon.Text = "▼"
+arrowIcon.Font = Enum.Font.GothamBold
+arrowIcon.TextSize = 10
+arrowIcon.TextColor3 = THEME.Accent
+arrowIcon.ZIndex = 6
+
+-- Boss Status Card
+local statusCard = Instance.new("Frame", bossPage)
+statusCard.Name = "StatusCard"
+statusCard.Size = UDim2.new(1, 0, 0, 60)
+statusCard.Position = UDim2.new(0, 0, 0, 44)
+statusCard.BackgroundColor3 = THEME.Surface
+statusCard.BorderSizePixel = 0
+Instance.new("UICorner", statusCard).CornerRadius = UDim.new(0, 10)
+local scStroke = Instance.new("UIStroke", statusCard)
+scStroke.Color = THEME.Border
+scStroke.Thickness = 1
+
+local statusIndicator = Instance.new("Frame", statusCard)
+statusIndicator.Size = UDim2.new(0, 9, 0, 9)
+statusIndicator.Position = UDim2.new(0, 12, 0, 14)
+statusIndicator.BackgroundColor3 = THEME.Red
+statusIndicator.BorderSizePixel = 0
+Instance.new("UICorner", statusIndicator).CornerRadius = UDim.new(1, 0)
+
+local statusText = Instance.new("TextLabel", statusCard)
+statusText.Size = UDim2.new(1, -34, 0, 18)
+statusText.Position = UDim2.new(0, 28, 0, 10)
+statusText.BackgroundTransparency = 1
+statusText.Text = "สถานะ: กำลังตรวจสอบ..."
+statusText.Font = Enum.Font.GothamBold
+statusText.TextSize = 12
+statusText.TextColor3 = THEME.TextPrimary
+statusText.TextXAlignment = Enum.TextXAlignment.Left
+statusText.TextTruncate = Enum.TextTruncate.AtEnd
+
+local fieldText = Instance.new("TextLabel", statusCard)
+fieldText.Size = UDim2.new(1, -24, 0, 16)
+fieldText.Position = UDim2.new(0, 12, 0, 34)
+fieldText.BackgroundTransparency = 1
+fieldText.Text = "สถานที่: -"
+fieldText.Font = Enum.Font.Gotham
+fieldText.TextSize = 11
+fieldText.TextColor3 = THEME.TextMuted
+fieldText.TextXAlignment = Enum.TextXAlignment.Left
+
+-- Action Button Row 1: All Boss Timers
+local timerToggleBtn = Instance.new("TextButton", bossPage)
+timerToggleBtn.Size = UDim2.new(1, 0, 0, 38)
+timerToggleBtn.Position = UDim2.new(0, 0, 0, 114)
+timerToggleBtn.BackgroundColor3 = THEME.SurfaceHi
+timerToggleBtn.BorderSizePixel = 0
+timerToggleBtn.Text = "ดูเวลาเกิดบอสทุกตัว"
+timerToggleBtn.Font = Enum.Font.GothamBold
+timerToggleBtn.TextSize = 11
+timerToggleBtn.TextColor3 = THEME.TextPrimary
+Instance.new("UICorner", timerToggleBtn).CornerRadius = UDim.new(0, 9)
+local ttStroke = Instance.new("UIStroke", timerToggleBtn)
+ttStroke.Color = THEME.BorderHi
+ttStroke.Thickness = 1
+
+-- Action Row 2: Server Hop Button
+local hopBtn = Instance.new("TextButton", bossPage)
+hopBtn.Name = "ServerHopButton"
+hopBtn.Size = UDim2.new(1, 0, 0, 38)
+hopBtn.Position = UDim2.new(0, 0, 0, 160)
+hopBtn.BackgroundColor3 = Color3.fromRGB(36, 54, 96)
+hopBtn.BorderSizePixel = 0
+hopBtn.Text = "Server Hop (ย้ายเซิร์ฟเวอร์)"
+hopBtn.Font = Enum.Font.GothamBold
+hopBtn.TextSize = 11
+hopBtn.TextColor3 = Color3.fromRGB(226, 238, 255)
+Instance.new("UICorner", hopBtn).CornerRadius = UDim.new(0, 9)
+local hopStroke = Instance.new("UIStroke", hopBtn)
+hopStroke.Color = Color3.fromRGB(64, 96, 168)
+hopStroke.Thickness = 1
+
+local isHopping = false
+local function serverHop()
+    if isHopping then return end
+    isHopping = true
+    hopBtn.Text = "กำลังค้นหาเซิร์ฟเวอร์..."
+    hopBtn.BackgroundColor3 = THEME.SurfaceHi
+
+    task.spawn(function()
+        local placeId = game.PlaceId
+        local currentJobId = game.JobId
+        local servers = {}
+
+        local ok, res = pcall(function()
+            local url = string.format(
+                "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100",
+                placeId
+            )
+            return HttpService:JSONDecode(game:HttpGet(url))
+        end)
+
+        if ok and type(res) == "table" and type(res.data) == "table" then
+            for _, srv in ipairs(res.data) do
+                if type(srv) == "table"
+                    and srv.id
+                    and srv.id ~= currentJobId
+                    and tonumber(srv.playing)
+                    and tonumber(srv.maxPlayers)
+                    and srv.playing < srv.maxPlayers
+                then
+                    table.insert(servers, srv.id)
+                end
+            end
+        end
+
+        if #servers > 0 then
+            local targetId = servers[math.random(1, #servers)]
+            hopBtn.Text = "กำลังย้ายเซิร์ฟเวอร์..."
+            local tpOk = pcall(function()
+                TeleportService:TeleportToPlaceInstance(placeId, targetId, player)
+            end)
+            if not tpOk then
+                pcall(function()
+                    TeleportService:Teleport(placeId, player)
+                end)
+            end
+        else
+            hopBtn.Text = "ย้ายเซิร์ฟเวอร์ (Auto)..."
+            pcall(function()
+                TeleportService:Teleport(placeId, player)
+            end)
+        end
+
+        task.wait(5)
+        isHopping = false
+        hopBtn.Text = "Server Hop (ย้ายเซิร์ฟเวอร์)"
+        hopBtn.BackgroundColor3 = Color3.fromRGB(36, 54, 96)
+    end)
+end
+
+hopBtn.MouseButton1Click:Connect(serverHop)
+
+-- Dropdown List Overlay
+local dropdownListFrame = Instance.new("Frame", bossPage)
+dropdownListFrame.Name = "DropdownList"
+dropdownListFrame.Size = UDim2.new(1, 0, 0, 195)
+dropdownListFrame.Position = UDim2.new(0, 0, 0, 40)
+dropdownListFrame.BackgroundColor3 = THEME.Bg
+dropdownListFrame.BorderSizePixel = 0
+dropdownListFrame.Visible = false
+dropdownListFrame.ZIndex = 20
+Instance.new("UICorner", dropdownListFrame).CornerRadius = UDim.new(0, 10)
+local ddlStroke = Instance.new("UIStroke", dropdownListFrame)
+ddlStroke.Color = THEME.BorderHi
+ddlStroke.Thickness = 1.5
+
+local scrollList = Instance.new("ScrollingFrame", dropdownListFrame)
+scrollList.Size = UDim2.new(1, -8, 1, -10)
+scrollList.Position = UDim2.new(0, 4, 0, 5)
+scrollList.BackgroundTransparency = 1
+scrollList.ScrollBarThickness = 4
+scrollList.ScrollBarImageColor3 = THEME.BorderHi
+scrollList.CanvasSize = UDim2.new(0, 0, 0, 0)
+scrollList.ZIndex = 21
+
+local listLayout = Instance.new("UIListLayout", scrollList)
+listLayout.Padding = UDim.new(0, 4)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    scrollList.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y + 6)
+end)
+
+-- ========================================================
+-- All Boss Timers Side Panel
+-- ========================================================
+local timerPanel = Instance.new("Frame", mainFrame)
+timerPanel.Name = "AllBossTimerPanel"
+timerPanel.Size = UDim2.new(0, 276, 0, 392)
+timerPanel.Position = UDim2.new(0, -284, 0, 0)
+timerPanel.BackgroundColor3 = THEME.Bg
+timerPanel.BorderSizePixel = 0
+timerPanel.Visible = false
+timerPanel.ZIndex = 10
+Instance.new("UICorner", timerPanel).CornerRadius = UDim.new(0, 14)
+local tpPanelStroke = Instance.new("UIStroke", timerPanel)
+tpPanelStroke.Color = THEME.Border
+tpPanelStroke.Thickness = 1.5
+
+local tpHeader = Instance.new("Frame", timerPanel)
+tpHeader.Size = UDim2.new(1, 0, 0, 44)
+tpHeader.BackgroundColor3 = THEME.Surface
+tpHeader.BorderSizePixel = 0
+tpHeader.ZIndex = 11
+Instance.new("UICorner", tpHeader).CornerRadius = UDim.new(0, 14)
+
+local tpHeaderMask = Instance.new("Frame", tpHeader)
+tpHeaderMask.Size = UDim2.new(1, 0, 0, 14)
+tpHeaderMask.Position = UDim2.new(0, 0, 1, -14)
+tpHeaderMask.BackgroundColor3 = THEME.Surface
+tpHeaderMask.BorderSizePixel = 0
+tpHeaderMask.ZIndex = 11
+
+local tpTitle = Instance.new("TextLabel", tpHeader)
+tpTitle.Size = UDim2.new(1, -24, 1, 0)
+tpTitle.Position = UDim2.new(0, 14, 0, 0)
+tpTitle.BackgroundTransparency = 1
+tpTitle.Text = "BOSS TIMERS (คลิกเพื่อเลือก)"
+tpTitle.Font = Enum.Font.GothamBlack
+tpTitle.TextSize = 12
+tpTitle.TextColor3 = THEME.TextPrimary
+tpTitle.TextXAlignment = Enum.TextXAlignment.Left
+tpTitle.ZIndex = 12
+
+local tpScroll = Instance.new("ScrollingFrame", timerPanel)
+tpScroll.Size = UDim2.new(1, -12, 1, -54)
+tpScroll.Position = UDim2.new(0, 6, 0, 48)
+tpScroll.BackgroundTransparency = 1
+tpScroll.ScrollBarThickness = 4
+tpScroll.ScrollBarImageColor3 = THEME.BorderHi
+tpScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+tpScroll.ZIndex = 11
+
+local tpLayout = Instance.new("UIListLayout", tpScroll)
+tpLayout.Padding = UDim.new(0, 4)
+tpLayout.SortOrder = Enum.SortOrder.LayoutOrder
+tpLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    tpScroll.CanvasSize = UDim2.new(0, 0, 0, tpLayout.AbsoluteContentSize.Y + 6)
+end)
+
+local timerRowRefs = {}
+
+local function updateTimerPanelUI()
+    if not timerPanel.Visible then return end
+    for bossName, refs in pairs(timerRowRefs) do
+        local _, label, color = getBossStatusInfo(bossName)
+        refs.dot.BackgroundColor3 = color
+        refs.timeLabel.Text = label
+        refs.timeLabel.TextColor3 = color
+        refs.row.BackgroundColor3 = (config.SelectedBoss == bossName)
+            and THEME.SurfaceHi
+            or THEME.Surface
+    end
+end
+
+local function updateBossStatusUI()
+    local selected = config.SelectedBoss
+    selectedLabel.Text = getBossDisplayName(selected)
+
+    local bossModel = getBossModel(selected)
+    local info = knownBossMap[selected]
+    local field = (info and info.field) or "ไม่ระบุ"
+    local rem = getBossRespawnRemaining(selected)
+
+    if bossModel then
+        local hum = bossModel:FindFirstChildOfClass("Humanoid")
+        local alive = hum and hum.Health > 0
+
+        local char = player.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local distText = ""
+        if root then
+            local bossPos = (bossModel.PrimaryPart and bossModel.PrimaryPart.Position) or bossModel:GetAttribute("Home")
+            if typeof(bossPos) ~= "Vector3" then
+                bossPos = bossModel:GetPivot().Position
+            end
+            local dist = math.floor((bossPos - root.Position).Magnitude)
+            distText = string.format(" (%d ม.)", dist)
+        end
+
+        if alive then
+            statusIndicator.BackgroundColor3 = THEME.Green
+            statusText.Text = "บอสเกิดแล้ว! (ALIVE)" .. distText
+        elseif rem then
+            statusIndicator.BackgroundColor3 = THEME.Amber
+            statusText.Text = string.format("รอเกิด (%s)", formatCountdown(rem))
+        else
+            statusIndicator.BackgroundColor3 = THEME.Amber
+            statusText.Text = "บอสตายแล้ว (DEAD)" .. distText
+        end
+    else
+        if rem then
+            statusIndicator.BackgroundColor3 = THEME.Amber
+            statusText.Text = string.format("รอเกิด (%s)", formatCountdown(rem))
+        else
+            statusIndicator.BackgroundColor3 = THEME.Red
+            statusText.Text = "ยังไม่เกิด (WAITING)"
+        end
+    end
+    fieldText.Text = "สถานที่: " .. field
+
+    updateTimerPanelUI()
+end
+
+local function getSortedBossList()
+    local list = {}
+    for bName, bData in pairs(knownBossMap) do
+        local lvl = (type(bData) == "table" and bData.level) or 1
+        table.insert(list, { name = bName, level = lvl })
+    end
+    table.sort(list, function(a, b)
+        if a.level == b.level then
+            return a.name < b.name
+        end
+        return a.level < b.level
+    end)
+    return list
+end
+
+local populateDropdownItems
+populateDropdownItems = function()
+    for _, ch in ipairs(scrollList:GetChildren()) do
+        if ch:IsA("TextButton") then
+            ch:Destroy()
+        end
+    end
+
+    for order, item in ipairs(getSortedBossList()) do
+        local name = item.name
+        local lvl = item.level
+        local isSelected = (config.SelectedBoss == name)
+
+        local itemBtn = Instance.new("TextButton")
+        itemBtn.Name = "Item_" .. name
+        itemBtn.Size = UDim2.new(1, -6, 0, 28)
+        itemBtn.BackgroundColor3 = isSelected and THEME.AccentDim or THEME.Surface
+        itemBtn.BorderSizePixel = 0
+        itemBtn.Text = ""
+        itemBtn.AutoButtonColor = true
+        itemBtn.LayoutOrder = order
+        itemBtn.ZIndex = 22
+        itemBtn.Parent = scrollList
+        Instance.new("UICorner", itemBtn).CornerRadius = UDim.new(0, 7)
+
+        local nameLabel = Instance.new("TextLabel", itemBtn)
+        nameLabel.Size = UDim2.new(1, -108, 1, 0)
+        nameLabel.Position = UDim2.new(0, 8, 0, 0)
+        nameLabel.BackgroundTransparency = 1
+        nameLabel.Font = Enum.Font.GothamMedium
+        nameLabel.TextSize = 11
+        nameLabel.TextColor3 = isSelected and THEME.Accent or THEME.TextPrimary
+        nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+        nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+        nameLabel.Text = name
+        nameLabel.ZIndex = 23
+
+        local _, statusShort, statusCol = getBossStatusInfo(name)
+        local timeBadge = Instance.new("TextLabel", itemBtn)
+        timeBadge.Size = UDim2.new(0, 52, 1, 0)
+        timeBadge.Position = UDim2.new(1, -98, 0, 0)
+        timeBadge.BackgroundTransparency = 1
+        timeBadge.Font = Enum.Font.GothamBold
+        timeBadge.TextSize = 10
+        timeBadge.TextColor3 = statusCol
+        timeBadge.TextXAlignment = Enum.TextXAlignment.Right
+        timeBadge.Text = statusShort
+        timeBadge.ZIndex = 23
+
+        local levelBadge = Instance.new("TextLabel", itemBtn)
+        levelBadge.Size = UDim2.new(0, 42, 1, 0)
+        levelBadge.Position = UDim2.new(1, -46, 0, 0)
+        levelBadge.BackgroundTransparency = 1
+        levelBadge.Font = Enum.Font.GothamBold
+        levelBadge.TextSize = 10
+        levelBadge.TextColor3 = THEME.Amber
+        levelBadge.TextXAlignment = Enum.TextXAlignment.Right
+        levelBadge.Text = string.format("Lv.%d", lvl)
+        levelBadge.ZIndex = 23
+
+        itemBtn.MouseButton1Click:Connect(function()
+            config.SelectedBoss = name
+            saveSettings()
+            dropdownListFrame.Visible = false
+            arrowIcon.Text = "▼"
+            updateBossStatusUI()
+            populateDropdownItems()
+        end)
+    end
+end
+
+local function populateTimerPanel()
+    for _, ch in ipairs(tpScroll:GetChildren()) do
+        if ch:IsA("TextButton") then
+            ch:Destroy()
+        end
+    end
+    timerRowRefs = {}
+
+    for order, item in ipairs(getSortedBossList()) do
+        local name = item.name
+        local lvl = item.level
+
+        local row = Instance.new("TextButton")
+        row.Name = "TimerRow_" .. name
+        row.Size = UDim2.new(1, -6, 0, 28)
+        row.BackgroundColor3 = (config.SelectedBoss == name) and THEME.SurfaceHi or THEME.Surface
+        row.BorderSizePixel = 0
+        row.Text = ""
+        row.AutoButtonColor = true
+        row.LayoutOrder = order
+        row.ZIndex = 12
+        row.Parent = tpScroll
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 7)
+
+        local dot = Instance.new("Frame", row)
+        dot.Size = UDim2.new(0, 7, 0, 7)
+        dot.Position = UDim2.new(0, 8, 0.5, -3)
+        dot.BackgroundColor3 = THEME.Red
+        dot.BorderSizePixel = 0
+        dot.ZIndex = 13
+        Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+        local bNameLabel = Instance.new("TextLabel", row)
+        bNameLabel.Size = UDim2.new(1, -118, 1, 0)
+        bNameLabel.Position = UDim2.new(0, 20, 0, 0)
+        bNameLabel.BackgroundTransparency = 1
+        bNameLabel.Font = Enum.Font.GothamMedium
+        bNameLabel.TextSize = 11
+        bNameLabel.TextColor3 = THEME.TextPrimary
+        bNameLabel.TextXAlignment = Enum.TextXAlignment.Left
+        bNameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+        bNameLabel.Text = name
+        bNameLabel.ZIndex = 13
+
+        local lvlLabel = Instance.new("TextLabel", row)
+        lvlLabel.Size = UDim2.new(0, 34, 1, 0)
+        lvlLabel.Position = UDim2.new(1, -96, 0, 0)
+        lvlLabel.BackgroundTransparency = 1
+        lvlLabel.Font = Enum.Font.Gotham
+        lvlLabel.TextSize = 10
+        lvlLabel.TextColor3 = THEME.TextMuted
+        lvlLabel.TextXAlignment = Enum.TextXAlignment.Right
+        lvlLabel.Text = string.format("Lv.%d", lvl)
+        lvlLabel.ZIndex = 13
+
+        local timeLabel = Instance.new("TextLabel", row)
+        timeLabel.Size = UDim2.new(0, 56, 1, 0)
+        timeLabel.Position = UDim2.new(1, -60, 0, 0)
+        timeLabel.BackgroundTransparency = 1
+        timeLabel.Font = Enum.Font.GothamBold
+        timeLabel.TextSize = 11
+        timeLabel.TextColor3 = THEME.Red
+        timeLabel.TextXAlignment = Enum.TextXAlignment.Right
+        timeLabel.Text = "-"
+        timeLabel.ZIndex = 13
+
+        timerRowRefs[name] = {
+            row = row,
+            dot = dot,
+            timeLabel = timeLabel,
+        }
+
+        row.MouseButton1Click:Connect(function()
+            config.SelectedBoss = name
+            saveSettings()
+            updateBossStatusUI()
+            populateDropdownItems()
+        end)
+    end
+
+    updateTimerPanelUI()
+end
+
+dropdownBtn.MouseButton1Click:Connect(function()
+    dropdownListFrame.Visible = not dropdownListFrame.Visible
+    arrowIcon.Text = dropdownListFrame.Visible and "▲" or "▼"
+    if dropdownListFrame.Visible then
+        scanDynamicBosses()
+        populateDropdownItems()
+    end
+end)
+
+timerToggleBtn.MouseButton1Click:Connect(function()
+    timerPanel.Visible = not timerPanel.Visible
+    if timerPanel.Visible then
+        timerToggleBtn.BackgroundColor3 = Color3.fromRGB(16, 56, 44)
+        timerToggleBtn.TextColor3 = THEME.Green
+        scanDynamicBosses()
+        populateTimerPanel()
+    else
+        timerToggleBtn.BackgroundColor3 = THEME.SurfaceHi
+        timerToggleBtn.TextColor3 = THEME.TextPrimary
+    end
+end)
+
+-- ========================================================
+-- Collapse / Expand Logic
+-- ========================================================
+local collapseTween = nil
+local function setCollapsed(collapsed, animate)
+    config.GuiCollapsed = collapsed
+    collapseBtn.Text = collapsed and "+" or "−"
+    headerMask.Visible = not collapsed
+    headerDivider.Visible = not collapsed
+
+    if collapsed then
+        timerPanel.Visible = false
+        timerToggleBtn.BackgroundColor3 = THEME.SurfaceHi
+        timerToggleBtn.TextColor3 = THEME.TextPrimary
+        dropdownListFrame.Visible = false
+        arrowIcon.Text = "▼"
+    end
+
+    if collapseTween then
+        collapseTween:Cancel()
+        collapseTween = nil
+    end
+
+    local targetSize = collapsed and COLLAPSED_SIZE or EXPANDED_SIZE
+    if animate then
+        if not collapsed then
+            bodyContainer.Visible = true
+        end
+        collapseTween = TweenService:Create(
+            mainFrame,
+            TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            { Size = targetSize }
+        )
+        collapseTween.Completed:Connect(function()
+            if config.GuiCollapsed then
+                bodyContainer.Visible = false
+            end
+        end)
+        collapseTween:Play()
+    else
+        mainFrame.Size = targetSize
+        bodyContainer.Visible = not collapsed
+    end
+end
+
+collapseBtn.MouseButton1Click:Connect(function()
+    setCollapsed(not config.GuiCollapsed, true)
     saveSettings()
 end)
 
--- นำค่าจาก config มาแสดงผลบนสวิตช์
+-- ========================================================
+-- Hydrate Initial UI State
+-- ========================================================
 attackSwitch.SetState(config.AutoAttack, false)
 sprintSwitch.SetState(config.AutoSprint, false)
 chestSwitch.SetState(config.AutoChest, false)
 replaySwitch.SetState(config.AutoReplay, false)
 autoDungeonSwitch.SetState(config.AutoDungeon, false)
-autoKeySwitch.SetState(config.AutoBuyKeys, false)
+updateActiveBadge()
 
--- เปิดใช้งาน AutoAttack / AutoSprint ตามคอนฟิกตอนเริ่ม
+setActiveTab(config.ActiveTab or "Farm", false)
+populateDropdownItems()
+populateTimerPanel()
+updateBossStatusUI()
+
 task.spawn(function()
     task.wait(0.5)
     if config.AutoAttack then
@@ -1068,7 +1991,7 @@ task.spawn(function()
 end)
 
 -- ========================================================
--- ซิงค์ปุ่มเกมแบบ Event-Driven & Hotkeys (R / Shift)
+-- Event-Driven Watchers & Hotkeys
 -- ========================================================
 local autoConn = nil
 local sprintConn = nil
@@ -1101,8 +2024,31 @@ end
 bindGameWatchers()
 
 UserInputService.InputBegan:Connect(function(input, processed)
+    -- Close boss dropdown when clicking outside
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if dropdownListFrame.Visible then
+            local mousePos = UserInputService:GetMouseLocation()
+            local listAbs = dropdownListFrame.AbsolutePosition
+            local listSize = dropdownListFrame.AbsoluteSize
+            local btnAbs = dropdownBtn.AbsolutePosition
+            local btnSize = dropdownBtn.AbsoluteSize
+
+            local inList = mousePos.X >= listAbs.X and mousePos.X <= (listAbs.X + listSize.X)
+                       and mousePos.Y >= (listAbs.Y + 36) and mousePos.Y <= (listAbs.Y + listSize.Y + 36)
+            local inBtn = mousePos.X >= btnAbs.X and mousePos.X <= (btnAbs.X + btnSize.X)
+                      and mousePos.Y >= (btnAbs.Y + 36) and mousePos.Y <= (btnAbs.Y + btnSize.Y + 36)
+
+            if not inList and not inBtn then
+                dropdownListFrame.Visible = false
+                arrowIcon.Text = "▼"
+            end
+        end
+    end
+
     if not processed then
-        if input.KeyCode == Enum.KeyCode.R then
+        if input.KeyCode == Enum.KeyCode.RightControl then
+            screenGui.Enabled = not screenGui.Enabled
+        elseif input.KeyCode == Enum.KeyCode.R then
             task.wait(0.15)
             local gameStatus = isGameAutoOn()
             if gameStatus ~= nil and config.AutoAttack ~= gameStatus then
@@ -1125,7 +2071,7 @@ end)
 -- ========================================================
 -- Background Loops
 -- ========================================================
--- 1. ซิงค์สถานะ Auto Attack / Sprint
+-- 1. Sync Auto Attack / Sprint + Dungeon Status Indicator
 task.spawn(function()
     while true do
         task.wait(0.5)
@@ -1143,6 +2089,15 @@ task.spawn(function()
             config.AutoSprint = gameSprintStatus
             sprintSwitch.SetState(gameSprintStatus, true)
             saveSettings()
+        end
+
+        local inDg = isInsideDungeon()
+        if inDg then
+            dgDot.BackgroundColor3 = THEME.Green
+            dgStatusLabel.Text = "สถานะปัจจุบัน: อยู่ในดันเจี้ยน (In Dungeon)"
+        else
+            dgDot.BackgroundColor3 = THEME.Accent
+            dgStatusLabel.Text = "สถานะปัจจุบัน: อยู่ด้านนอก (Lobby)"
         end
     end
 end)
@@ -1202,3 +2157,13 @@ task.spawn(function()
         end
     end
 end)
+
+-- 6. Boss Status UI Updater
+task.spawn(function()
+    while true do
+        task.wait(0.3)
+        updateBossStatusUI()
+    end
+end)
+
+print("[x2shift] PetHuntHub (Farm + Dungeon + Boss) Loaded!")
